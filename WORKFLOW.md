@@ -56,3 +56,4 @@ Fail (i) -> return to multi-peak framing. Fail (ii) -> redirect to string level
 - `s2_tempcoeff_error.png` — gamma_r faithful, beta_oc deviation == |Adjust| (resolved, not open).
 - `s3_multipeak.png` — stepped I-V and multi-peak P-V (canonical module).
 - `s3_reverse_bias_sweep.png` — avalanche params cannot act in this regime (scoped claim, not "invariant generally").
+- `s4_sandia_crosscheck.png` — single-diode layer validated vs Sandia measurement (~2% near STC, ~2.5% at 55 °C) across 108 c-Si twin pairs.

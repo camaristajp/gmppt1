@@ -236,7 +236,9 @@ STC and ~2.5% at operating heat. Three consequences:
   based route - two methods, same magnitude of off-STC temperature uncertainty;
 - it validates the SINGLE-SUBSTRING layer only, not the multi-peak composition.
 Pass criterion: Pmp mean < 3% near STC and < 6% at 55 C. Both met. PASS.
-Artefact: results/s4_sandia_crosscheck.csv.
+Artefact: results/s4_sandia_crosscheck.csv;
+figure results/figures/s4_sandia_crosscheck.png (error bars per quantity
+25C vs 55C, plus the Pmp error distribution over all pairs).
 
 **Leg 3 - quantitative multi-peak - DEFERRED to Phase 8, recorded as a finding.**
 No public dataset of measured, partial-shaded, multi-peak I-V curves on

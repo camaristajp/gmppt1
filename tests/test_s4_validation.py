@@ -19,7 +19,7 @@ def test_electrical_twins_exist():
 def test_single_diode_agrees_with_sandia_measurement():
     """Leg 2: single-diode form agrees with the measurement-derived Sandia model
     to a stated tolerance near STC and at operating heat."""
-    ok, rows, npairs, nused = s4.leg2_sandia()
+    ok, rows, npairs, nused, res = s4.leg2_sandia()
     assert nused >= 50
     # near-STC Pmp mean < 3%, operating-heat Pmp mean < 6%
     pmp25 = [r for r in rows if r[0] == 25 and r[1] == "Pmp"][0][2]

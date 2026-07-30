@@ -207,7 +207,7 @@ def leg2_sandia():
 
     pd.DataFrame(rows, columns=["T_C", "qty", "mean_pct", "median_pct", "max_pct"]
                  ).to_csv(config.RESULTS_DIR / "s4_sandia_crosscheck.csv", index=False)
-    return ok, rows, len(pairs), n
+    return ok, rows, len(pairs), n, res
 
 
 def leg3_note():
@@ -222,13 +222,54 @@ def leg3_note():
     print("  measured I-V in Phase 8. Recorded as a finding, not an open gap.")
 
 
+def make_figure(res, npairs):
+    """S4 figure: single-diode vs Sandia-measurement agreement across the twin
+    pairs, near-STC vs operating heat. Makes the ~2% error bar visible."""
+    from gmppt import viz
+    import matplotlib.pyplot as plt
+
+    quants = ["Voc", "Vmp", "Pmp"]
+    colors = {"Voc": viz.TEAL, "Vmp": viz.BLUE, "Pmp": viz.ORANGE}
+    fig, (axl, axr) = plt.subplots(1, 2, figsize=(9.4, 3.9))
+
+    # LEFT: grouped bars, mean error per quantity, 25C vs 55C
+    x = np.arange(len(quants))
+    w = 0.36
+    m25 = [np.mean(res[25][q]) for q in quants]
+    m55 = [np.mean(res[55][q]) for q in quants]
+    axl.bar(x - w/2, m25, w, label="25 °C (near-STC)", color=viz.GRAY)
+    axl.bar(x + w/2, m55, w, label="55 °C (operating heat)", color=viz.ORANGE)
+    axl.axhline(2.0, color=viz.GRAY, ls="--", lw=1, label="2% reference")
+    axl.set_xticks(x); axl.set_xticklabels(quants)
+    axl.set_ylabel("|error| vs measurement (%)")
+    axl.set_title("Single-diode vs Sandia measurement\n(mean over module pairs)")
+    axl.legend(fontsize=8)
+
+    # RIGHT: distribution of the headline Pmp error, showing where the pairs sit
+    for T, c in [(25, viz.GRAY), (55, viz.ORANGE)]:
+        axr.hist(res[T]["Pmp"], bins=24, alpha=0.7, color=c,
+                 label=f"{T} °C  (mean {np.mean(res[T]['Pmp']):.1f}%)")
+    axr.axvline(2.0, color=viz.GRAY, ls="--", lw=1)
+    axr.set_xlabel("P$_{mp}$ |error| vs measurement (%)")
+    axr.set_ylabel("module-condition samples")
+    axr.set_title("Power-error distribution\n(single-diode vs measurement)")
+    axr.legend(fontsize=8)
+
+    fig.suptitle(f"S4 leg 2: single-diode layer validated vs measurement "
+                 f"across {npairs} c-Si twin pairs", fontsize=10)
+    return viz.save_fig(fig, "s4_sandia_crosscheck")
+
+
 if __name__ == "__main__":
     print("S4  External validation of the simulator")
     print("  " + config.provenance())
     print("=" * 66)
     leg1 = leg1_basoglu()
-    leg2_ok, rows, npairs, nused = leg2_sandia()
+    leg2_ok, rows, npairs, nused, res = leg2_sandia()
     leg3_note()
+
+    path = make_figure(res, nused)
+    print(f"\n  Figure -> {path.relative_to(config.PROJECT_ROOT)}")
 
     print("\n" + "=" * 66)
     # S4 passes on the quantitative leg (leg 2); leg 1 is structural-supporting,
