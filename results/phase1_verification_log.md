@@ -1,7 +1,7 @@
 # Phase 1 Verification Log
 
 **Provenance:** pvlib 0.15.2 (pinned) | CEC catalogue 21,535 rows | master seed
-20260901 | git 2d50235. Regenerated from a clean run of S1 -> S2 -> S3; every
+20260901 | git bf0ddb2. Regenerated from a clean run of S1 -> S2 -> S3; every
 number below is reproduced by `make stage1 stage2`, not hand-transcribed. If the
 provenance line printed by a script disagrees with this header, the artefacts are
 stale and must be regenerated before they are trusted.
