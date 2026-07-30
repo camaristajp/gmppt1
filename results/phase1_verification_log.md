@@ -57,7 +57,31 @@ EgRef/dEgdT per module to tighten beta_oc. Recommendation: accept + document;
 the study's coefficient question is answered in normalised terms regardless.
 
 ## Status
-S1, S2 PASS. Simulator verification step 1 (STC) complete for the operating-point
-quantities the study uses. Not yet done: S3 (reverse-bias + bypass), S4
-(published-shading reproduction = verification step 2). Gate A cannot be
-evaluated until S3, S4, S6, S7, S8 are complete.
+S1, S2, S3 PASS (12 tests). Simulator now produces the multi-peak characteristic.
+Not yet done: S4 (published-shading reproduction = verification step 2), S5
+(array generalisation), S6-S8. Gate A cannot be evaluated until S6-S8 complete.
+
+## S3 - reverse-bias (Bishop) + bypass diodes - PASS
+Module = 3 substrings in series, each a cell-fraction-scaled single-diode model
+(a_ref, R_s, R_sh_ref scaled by 1/3; I_L_ref, I_o_ref, alpha_sc unchanged),
+extended into reverse bias by pvlib bishop88, shunted by an anti-parallel bypass
+diode (I0=1e-9 A, n=1). Composed in the current domain: I_elem(V) = I_substring(V)
++ I_bypass(V), inverted to V(I), summed across substrings.
+
+Four checkpoints, all enforced by tests (test_s3_device.py):
+1. UNSHADED CONSISTENCY - 3 uniform substrings reproduce the direct single-diode
+   module to 3 sig figs: P_mp exact (0.0000%), V_oc/I_sc/V_mp/I_mp all OK. This
+   proves the scaling + composition are correct.
+2. MULTI-PEAK - substrings at 1000/600/300 W/m^2 give 3 peaks; GMPP = 125.5 W at
+   25.1 V (mid-curve), vs 100.8 W at the rightmost peak the fixed-0.8 model
+   targets. Staircase confirmed (bypass switching at ~40->28 V and ~24->13 V).
+3. BYPASS ACTIVATION - a 200 W/m^2 substring forced to the bright Isc clamps at
+   -0.582 V, as expected for a ~0.6 V bypass diode.
+4. REVERSE-BIAS INSENSITIVITY - turning avalanche on (factor 2e-3) vs off moves
+   GMPP by 0.000%. The bypass clamps long before avalanche, so the uncertain
+   reverse-bias parameters (a named limitation) are inert in normal multi-peak
+   operation and matter only near-threshold / under sub-substring shading (S6).
+   Default is breakdown_factor=0; the parameters are exposed for the S6 sweep.
+
+Reverse-bias parameters are documented as an explicit assumption, not fitted.
+Bypass diode I0/n are stated parameters, exposed for sensitivity.

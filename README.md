@@ -49,7 +49,7 @@ fallback margin 1 % of operating power.
 |---|---|---|
 | S1 | CEC coefficient spread (no simulator) | PASS |
 | S2 | single-diode STC verification | PASS |
-| S3 | reverse-bias (Bishop) + bypass diodes | not started |
+| S3 | reverse-bias (Bishop) + bypass diodes | PASS |
 | S4 | published-shading reproduction | not started |
 | S5–S8 | array generalisation, scenarios, GMPP labelling, Gate A | not started |
 
