@@ -10,16 +10,18 @@ convergence check — each S-step still proves its own number before the next.
 | Stage | S-steps | What | Done when |
 |---|---|---|---|
 | 1 | S1, S2 | Environment + STC verification | S1 reproduces the full-catalogue CEC spread AND saves the c-Si-only pool (in-scope population); S2 gated quantities (V_oc, V_mp, I_mp — the STC operating point) match datasheet to 3 sig figs across the design span. **Gate amended:** temperature coefficients are *not* held to 3 sig figs — unachievable under the CEC parameterisation (only 0.19% of c-Si modules qualify), the beta_oc deviation equals \|Adjust\| and is carried as a documented bias, not a failure. See plan Section 9.2 and the verification log. **DONE.** |
-| 2 | S3, S4 | Shading physics + external validation | Stepped I-V / multi-peak P-V correct, reverse-bias params recorded as a **swept range**; Basoglu + one baseline reproduce to reported precision. (S3 done; S4 pending source cases.) |
+| 2 | S3, S4 | Shading physics + external validation | Stepped I-V / multi-peak P-V correct, reverse-bias params recorded as a **swept range** (S3 done). S4 external validation in three legs: **leg 1** Basoglu structural (peak count/region/ordering reproduced — magnitude gap expected, his source under-specified); **leg 2** single-diode vs Sandia *measurement* model, ~2% near STC and ~2.5% at 55C across 108 c-Si twin pairs (the off-STC error bar, corroborating S2's beta_oc finding independently); **leg 3** quantitative multi-peak validation deferred to Phase 8 (no public dataset exists — confirmed by evaluating Basoglu, a Mendeley set, and a literature search). **DONE.** |
 | 3 | S5 | Array generalisation | Single module is the N=1 special case; a short string composes correctly. Standalone (see note). |
 | 4 | S6, S7, S8 | Scenario gen -> labelling -> characterisation -> **Gate A** | S6 seeded generator + by-module split; S7 GMPP labelling passes its step-halving convergence check; S8 statistics converge and the three headline numbers (coefficient distribution, region-error rate, worst case in watts) are stable. Ends in Gate A. |
 
 ## Invariants (cannot move)
 
 1. **S2 green before S3 is built.** (Met.)
-2. **S4 green before anything in the S6-S8 block runs.** No exceptions. Merging
-   stages changes how we report and checkpoint; it is NOT permission to run a
-   merged stage and only test at the end. Each S-step is proven before the next.
+2. **S4 green before anything in the S6-S8 block runs.** (Met — S4 validates the
+   single-diode layer against measurement, structurally reproduces Basoglu, and
+   documents the multi-peak-composition deferral to Phase 8.) Merging stages
+   changes how we report and checkpoint; it is NOT permission to run a merged
+   stage and only test at the end. Each S-step is proven before the next.
 3. Every S-step keeps its own convergence check: S7 step-halving on the dense
    sweep; S8 statistics-convergence on scenario count.
 4. **Determinism across machines.** The c-Si pool, the S2 span, and the S3

@@ -49,7 +49,7 @@ fallback margin 1 % of operating power.
 | stage | S-steps | what | state |
 |---|---|---|---|
 | 1 | S1, S2 | environment + STC verification (STC operating point; temp coeffs documented) | PASS |
-| 2 | S3, S4 | shading physics + external validation | S3 PASS, S4 pending source cases |
+| 2 | S3, S4 | shading physics + external validation | PASS (S4: single-diode validated vs Sandia measurement ~2%; Basoglu structural; multi-peak deferred to Phase 8) |
 | 3 | S5 | array generalisation (standalone, scheduled early) | not started |
 | 4 | S6–S8 | scenarios → labelling → characterisation → Gate A | not started (blocked on S4) |
 

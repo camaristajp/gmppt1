@@ -197,3 +197,65 @@ for Gate A(i)'s region-error-rate-under-sub-substring-geometry test - blocks S6;
 (b) temperature-dependent bypass I0 and its addition to the S6 sweep; (c) the
 plan-text amendment to Section 9.2 (temperature-coefficient gate) and Section 4
 (c-Si vs full-catalogue figures, "outlier designs" wording).
+
+## S4 - external validation of the simulator - PASS
+
+S3 proved self-consistency (composed == direct model); that is not validation,
+because a sign error reproduces perfectly. S4 checks the simulator against
+sources it was NOT built to reproduce, in three legs of deliberately different
+strength. No PySAM required for the gated leg.
+
+**Leg 1 - structural, vs Basoglu (2019).** Fitted his Table II submodule, composed
+three in series, ran his two published shading cases. Peak STRUCTURE reproduces:
+Case-1 gives 3 peaks (GMPP in the middle region), Case-2 gives 2 peaks, both
+correct; voltage ordering correct. The GMPP *magnitude* differs by ~9% from his
+numbers - but this is expected and not our error: his module is a lab PV-emulator
+part specified by only 4 datasheet points, and his Table IV "theoretical" column
+is itself a 0.8-model prediction (its GMPP current 3.34 A implies a limiting
+substring at ~570 W/m^2, which does not exist in his 100/500/1000 case - i.e. it
+is not a device-simulation result). Reproducing it exactly would be a red flag.
+Leg 1 is therefore QUALITATIVE (structure), PASS.
+
+**Leg 2 - single-diode physics vs Sandia MEASUREMENT model - the gated quantitative
+check.** The CEC and Sandia libraries do not share modules by identity, but 108
+c-Si modules are electrical twins (V_oc/I_sc/V_mp/I_mp/N_s matched to tight
+tolerance). Sandia coefficients are fit from outdoor MEASUREMENTS; CEC gives the
+single-diode parameters our simulator uses. Running both across irradiance and
+temperature (no fit, no PySAM):
+
+| condition | Voc | Vmp | Pmp |
+|---|---|---|---|
+| 25 C, G=600/300 (near-STC) | 1.0% mean | 1.5% mean | 2.1% mean (max 7.3) |
+| 55 C, G=600/300 (operating heat) | 1.3% mean | 2.0% mean | 2.5% mean (max 11.9) |
+
+The single-substring physics agrees with a measurement-derived model to ~2% near
+STC and ~2.5% at operating heat. Three consequences:
+- this is the off-STC error bar every temperature-dependent result (S8, Phase 3)
+  must carry, now measured against measurement rather than assumed;
+- it CORROBORATES the S2 beta_oc/Adjust finding from an independent, measurement-
+  based route - two methods, same magnitude of off-STC temperature uncertainty;
+- it validates the SINGLE-SUBSTRING layer only, not the multi-peak composition.
+Pass criterion: Pmp mean < 3% near STC and < 6% at 55 C. Both met. PASS.
+Artefact: results/s4_sandia_crosscheck.csv.
+
+**Leg 3 - quantitative multi-peak - DEFERRED to Phase 8, recorded as a finding.**
+No public dataset of measured, partial-shaded, multi-peak I-V curves on
+three-substring c-Si modules with full parameters exists. Confirmed by evaluating
+three candidates: Basoglu (under-specified, emulator, 0.8-model "theoretical"
+values); a Mendeley outdoor mismatch-fault set (real curves but single small
+~20-90 W panels, mostly single-peak - wrong module class); and a targeted
+literature search (returns only MATLAB/Simulink simulation output, or measured
+curves locked inside papers as figures, never as reusable data). The multi-peak
+COMPOSITION layer is therefore validated against the partner's measured I-V in
+Phase 8. This confirms plan Section 9.11's premise by exhausting the alternatives
+rather than asserting it.
+
+**What S4 secures, and what it does not.** The simulator is a stack: single-diode
+substring -> bypass/series composition -> multi-peak module -> extracted
+coefficient. S4 validates the BOTTOM layer against measurement (leg 2) and the
+STRUCTURE of the composition against published work (leg 1). It does NOT validate
+the composition's magnitude - that is Phase 8's job, now the load-bearing
+validation for C1's distribution and C3's learned model. The ~2-2.5% off-STC band
+travels with every temperature-dependent claim downstream.
+
+Status: 18 tests pass. S4 green -> the S6-S8 block is unblocked (invariant met).

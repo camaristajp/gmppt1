@@ -6,8 +6,9 @@ test:
 stage1:                 # S1 + S2  (environment + STC verification)
 	python phase1/s1_cec_characterisation.py
 	python phase1/s2_stc_verification.py
-stage2:                 # S3 (+ S4 when source cases are in)
+stage2:                 # S3 + S4 (shading physics + external validation)
 	python phase1/s3_reverse_bias_bypass.py
+	python phase1/s4_external_validation.py
 stage3:                 # S5  (array generalisation) -- not yet built
 	@echo "S5 not yet implemented"
 stage4:                 # S6 + S7 + S8 -> Gate A -- blocked until S4 green

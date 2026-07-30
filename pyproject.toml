@@ -21,6 +21,11 @@ dependencies = [
 dev = [
     "pytest==8.4.2",
 ]
+# Leg 1 of S4 (Basoglu parameter fit) needs PySAM. Optional: S4 passes on leg 2
+# (Sandia cross-check) without it.
+validation = [
+    "nrel-pysam",
+]
 
 [tool.setuptools.packages.find]
 include = ["gmppt*"]
