@@ -1,0 +1,8 @@
+# Direct dependencies, pinned to the versions Phase 1 was validated against.
+# Full transitive lock is in requirements-lock.txt (pip freeze of the venv).
+numpy==2.4.4
+scipy==1.17.1
+pandas==3.0.2
+pvlib==0.15.2
+pyarrow==25.0.0
+pytest==8.4.2
