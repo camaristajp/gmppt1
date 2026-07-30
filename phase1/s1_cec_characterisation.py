@@ -58,3 +58,21 @@ if __name__ == "__main__":
     df = df.assign(vmp_voc=ratio)
     df.to_parquet(config.CEC_POOL)
     print(f"\n  Saved module pool -> {config.CEC_POOL.relative_to(config.PROJECT_ROOT)}")
+
+    # Figure: the coefficient spread (the C1 premise)
+    from gmppt import viz
+    import matplotlib.pyplot as plt
+    fig, ax = plt.subplots(figsize=(6.4, 3.6))
+    ax.hist(ratio, bins=120, color=viz.BLUE, alpha=0.85)
+    ax.axvspan(0.79, 0.81, color=viz.GRAY, alpha=0.25,
+               label=f"within ±0.01 of 0.80 ({stats['pct_within_0.01_of_0.80']:.1f}%)")
+    ax.axvline(0.80, color=viz.GRAY, lw=1.2, ls="--", label="conventional 0.80")
+    ax.axvline(stats["mean"], color=viz.ORANGE, lw=1.5,
+               label=f"population mean {stats['mean']:.3f}")
+    ax.set_xlabel("STC coefficient  V$_{mp}$/V$_{oc}$")
+    ax.set_ylabel("modules")
+    ax.set_title(f"CEC coefficient spread across {stats['N']:,} modules")
+    ax.legend(fontsize=8, loc="upper left")
+    path = viz.save_fig(fig, "s1_coefficient_spread")
+    print(f"  Figure -> {path.relative_to(config.PROJECT_ROOT)}")
+

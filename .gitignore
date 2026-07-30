@@ -11,6 +11,7 @@ venv/
 /results/*
 !/results/.gitkeep
 !/results/phase1_verification_log.md
+/results/figures/
 
 # OS / editor
 .DS_Store

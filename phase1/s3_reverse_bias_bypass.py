@@ -103,20 +103,83 @@ def check_bypass_activation(mp):
     return ok
 
 
-def check_reverse_bias_insensitivity(mp):
-    print("\n4) REVERSE-BIAS INSENSITIVITY  (avalanche off vs on)")
-    off = device.analyse(device.module_iv(
-        mp, [1000, 600, 300], 25.0, bd=Breakdown(factor=0.0)))["gmpp"]
-    on = device.analyse(device.module_iv(
-        mp, [1000, 600, 300], 25.0,
-        bd=Breakdown(factor=2e-3, voltage=-15.0, exp=3.28)))["gmpp"]
-    dP = abs(on["P"] - off["P"]) / off["P"] * 100
-    print(f"   GMPP power  off: {off['P']:.3f} W   on: {on['P']:.3f} W   "
-          f"delta: {dP:.3f}%")
-    ok = dP < 0.5
-    print(f"   GMPP insensitive to avalanche params (<0.5%): "
-          f"{'OK' if ok else 'FAIL'}  (matters only near-threshold / sub-substring)")
-    return ok
+def check_reverse_bias_sweep(mp):
+    """Record the GMPP over a SWEPT RANGE of avalanche parameters (Stage 2
+    done-criterion: reverse-bias params recorded as a swept range). The bypass
+    clamps first, so the GMPP should be invariant across the plausible range."""
+    print("\n4) REVERSE-BIAS SWEEP  (GMPP vs avalanche parameters)")
+    factors = [0.0, 1e-4, 1e-3, 5e-3, 1e-2, 5e-2]      # breakdown_factor range
+    voltages = [-30.0, -20.0, -15.0, -10.0]            # breakdown_voltage range
+    base = device.analyse(device.module_iv(
+        mp, [1000, 600, 300], 25.0, bd=Breakdown(factor=0.0)))["gmpp"]["P"]
+    records = []
+    max_dev = 0.0
+    for f in factors:
+        for vbr in voltages:
+            P = device.analyse(device.module_iv(
+                mp, [1000, 600, 300], 25.0,
+                bd=Breakdown(factor=f, voltage=vbr, exp=3.28)))["gmpp"]["P"]
+            dev = abs(P - base) / base * 100
+            max_dev = max(max_dev, dev)
+            records.append((f, vbr, P, dev))
+    tbl = pd.DataFrame(records,
+                       columns=["breakdown_factor", "breakdown_voltage",
+                                "gmpp_W", "dev_pct"])
+    tbl.to_csv(config.RESULTS_DIR / "s3_reverse_bias_sweep.csv", index=False)
+    print(f"   swept {len(factors)}x{len(voltages)} = {len(records)} combinations")
+    print(f"   base GMPP {base:.3f} W;  max deviation over the range: "
+          f"{max_dev:.4f}%")
+    ok = max_dev < 0.5
+    print(f"   GMPP invariant across the swept range (<0.5%): "
+          f"{'OK' if ok else 'FAIL'}  -> avalanche params inert until near-"
+          f"threshold / sub-substring (S6)")
+    return ok, tbl, base
+
+
+def make_figures(mp, sweep_tbl, base):
+    """S3 figures: the multi-peak curve and the reverse-bias sweep."""
+    from gmppt import viz
+    import matplotlib.pyplot as plt
+
+    # multi-peak I-V and P-V
+    c = device.module_iv(mp, [1000, 600, 300], 25.0)
+    a = device.analyse(c)
+    m = c["V"] >= 0
+    V, I, P = c["V"][m], c["I"][m], c["P"][m]
+    fig, (axl, axr) = plt.subplots(1, 2, figsize=(9.2, 3.8))
+    axl.plot(V, I, color=viz.BLUE, lw=2)
+    axl.set_xlabel("Module voltage (V)"); axl.set_ylabel("Current (A)")
+    axl.set_title("Stepped I–V (bypass switching)")
+    axr.plot(V, P, color=viz.BLUE, lw=2, label="P–V")
+    for k, (vv, ii, pp) in enumerate(a["peaks"]):
+        is_g = abs(pp - a["gmpp"]["P"]) < 1e-6
+        axr.plot(vv, pp, "o", ms=9 if is_g else 6,
+                 color=viz.ORANGE if is_g else viz.GRAY,
+                 label="global peak" if is_g else ("local peaks" if k == 0 or
+                       (k == 1 and abs(a["peaks"][0][2]-a["gmpp"]["P"])<1e-6) else None))
+    axr.set_xlabel("Module voltage (V)"); axr.set_ylabel("Power (W)")
+    axr.set_title(f"Multi-peak P–V: {a['n_peaks']} peaks, "
+                  f"GMPP {a['gmpp']['P']:.1f} W")
+    axr.legend(fontsize=8)
+    fig.suptitle(f"{mp.name[:40]}  |  substrings 1000 / 600 / 300 W/m²",
+                 fontsize=10)
+    p1 = viz.save_fig(fig, "s3_multipeak")
+
+    # reverse-bias sweep
+    tbl = sweep_tbl
+    fig2, ax2 = plt.subplots(figsize=(6.6, 3.8))
+    for vbr, sub in tbl.groupby("breakdown_voltage"):
+        ax2.plot(sub["breakdown_factor"], sub["gmpp_W"], "o-",
+                 label=f"V_br={vbr:.0f} V", lw=1.5, ms=4)
+    ax2.set_xscale("symlog", linthresh=1e-4)
+    ax2.axhline(base, color=viz.GRAY, ls="--", lw=1, label="baseline (off)")
+    ax2.set_xlabel("breakdown_factor (swept)")
+    ax2.set_ylabel("GMPP power (W)")
+    ax2.set_title("Reverse-bias sweep: GMPP invariant (bypass clamps first)")
+    ax2.legend(fontsize=8, ncol=2)
+    p2 = viz.save_fig(fig2, "s3_reverse_bias_sweep")
+    print(f"\n   Figures -> {p1.relative_to(config.PROJECT_ROOT)}, "
+          f"{p2.relative_to(config.PROJECT_ROOT)}")
 
 
 if __name__ == "__main__":
@@ -126,7 +189,8 @@ if __name__ == "__main__":
     c1 = check_unshaded_consistency(mp)
     demo_multipeak(mp)
     c3 = check_bypass_activation(mp)
-    c4 = check_reverse_bias_insensitivity(mp)
+    c4, sweep_tbl, base = check_reverse_bias_sweep(mp)
+    make_figures(mp, sweep_tbl, base)
     print("\n" + "=" * 66)
     print(f"S3 checkpoint: {'PASS' if (c1 and c3 and c4) else 'FAIL'}  "
-          f"(consistency={c1}, bypass={c3}, insensitivity={c4})")
+          f"(consistency={c1}, bypass={c3}, sweep_invariant={c4})")

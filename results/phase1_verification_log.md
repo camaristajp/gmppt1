@@ -1,7 +1,12 @@
 # Phase 1 Verification Log
 
-Toolchain: Python 3.12, pvlib 0.15.2, CEC database (21,535 modules).
-Everything seeded; scripts in `src/`, outputs in `results/`.
+Toolchain: Python 3.12, pvlib 0.15.2, matplotlib 3.11.1, CEC database
+(21,535 modules). Everything seeded; scripts in `phase1/`, outputs and figures
+in `results/`.
+
+Stages (see WORKFLOW.md): Stage 1 = S1+S2 (env + STC), Stage 2 = S3+S4 (shading
+physics + external validation), Stage 3 = S5 (array, standalone/early),
+Stage 4 = S6+S7+S8 (pipeline -> Gate A). Invariant: S4 green before any S6-S8.
 
 ## S1 - CEC coefficient characterisation (simulator-independent) - PASS
 Reads V_mp_ref/V_oc_ref from the CEC database; no device model involved.

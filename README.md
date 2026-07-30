@@ -45,13 +45,14 @@ fallback margin 1 % of operating power.
 
 ## Status
 
-| step | what | state |
-|---|---|---|
-| S1 | CEC coefficient spread (no simulator) | PASS |
-| S2 | single-diode STC verification | PASS |
-| S3 | reverse-bias (Bishop) + bypass diodes | PASS |
-| S4 | published-shading reproduction | not started |
-| S5–S8 | array generalisation, scenarios, GMPP labelling, Gate A | not started |
+| stage | S-steps | what | state |
+|---|---|---|---|
+| 1 | S1, S2 | environment + STC verification | PASS |
+| 2 | S3, S4 | shading physics + external validation | S3 PASS, S4 pending source cases |
+| 3 | S5 | array generalisation (standalone, scheduled early) | not started |
+| 4 | S6–S8 | scenarios → labelling → characterisation → Gate A | not started (blocked on S4) |
+
+See WORKFLOW.md for stage done-criteria and invariants.
 
 See `results/phase1_verification_log.md` for the detailed log, including the
 documented CEC `I_sc`/`I_L_ref` convention and the temperature-coefficient

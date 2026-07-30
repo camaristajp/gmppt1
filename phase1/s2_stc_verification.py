@@ -101,8 +101,11 @@ if __name__ == "__main__":
     print("=" * 74)
     gate_ok = True
     isc_ds_offsets = []
+    tc_records = []   # (module, coeff, pct_off)
+    stc_table = []    # (module, qty, model, ref, rel%, gated)
     for idx, row in span.iterrows():
         stc, tc = verify_module(row)
+        short = idx[:28]
         print(f"\n{idx[:60]}   (Vmp/Voc={row['vmp_voc']:.3f}, "
               f"{row['Technology']})")
         print(f"  {'qty':14s} {'model':>10s} {'ref':>10s} "
@@ -112,6 +115,8 @@ if __name__ == "__main__":
                 gate_ok &= ok3
             if name == "I_sc":
                 isc_ds_offsets.append(rel)
+            if name.strip() not in ("(I_L_ref)",):
+                stc_table.append((short, name.strip(), got, ref, rel, gated))
             tag = "OK" if ok3 else ("FAIL" if gated else "--")
             note = "  [gated]" if gated else "  [reported]"
             print(f"  {name:14s} {got:10.4f} {ref:10.4f} {rel:8.3f}  "
@@ -119,6 +124,7 @@ if __name__ == "__main__":
         print("  temp coeffs (reported, emergent from fit):")
         for name, got, ref in tc:
             rel = abs(got - ref) / abs(ref) * 100 if ref else float('nan')
+            tc_records.append((short, name, rel))
             print(f"    {name:9s} {got:+10.5f} {ref:+10.5f}  ({rel:5.1f}% off)")
 
     print("\n" + "=" * 74)
@@ -128,3 +134,35 @@ if __name__ == "__main__":
           f"offset {min(isc_ds_offsets):.2f}-{max(isc_ds_offsets):.2f}% is a CEC")
     print("  fit convention (I_L_ref>=I_sc_ref), immaterial to a voltage coefficient.")
     print("  Temp coeffs: emergent, ~5-15% (alpha_sc/beta_oc), <1.5% (gamma_r).")
+
+    # Table -> CSV
+    tbl = pd.DataFrame(stc_table,
+                       columns=["module", "qty", "model", "ref", "rel_pct", "gated"])
+    tbl.to_csv(config.RESULTS_DIR / "s2_stc_table.csv", index=False)
+
+    # Figure: temperature-coefficient error across the span (the open finding).
+    from gmppt import viz
+    import matplotlib.pyplot as plt
+    import numpy as np
+    tcdf = pd.DataFrame(tc_records, columns=["module", "coeff", "pct"])
+    coeffs = ["alpha_sc", "beta_oc", "gamma_r"]
+    mods = list(dict.fromkeys(tcdf["module"]))
+    x = np.arange(len(mods))
+    w = 0.26
+    colors = {"alpha_sc": viz.GRAY, "beta_oc": viz.ORANGE, "gamma_r": viz.TEAL}
+    fig, ax = plt.subplots(figsize=(7.0, 3.8))
+    for i, c in enumerate(coeffs):
+        vals = [tcdf[(tcdf.module == m) & (tcdf.coeff == c)]["pct"].values[0]
+                for m in mods]
+        ax.bar(x + (i - 1) * w, vals, w, label=c, color=colors[c])
+    ax.axhline(3.0, color=viz.GRAY, ls="--", lw=1,
+               label="3% reference")
+    ax.set_xticks(x)
+    ax.set_xticklabels([m[:14] for m in mods], rotation=30, ha="right", fontsize=8)
+    ax.set_ylabel("|error| vs datasheet (%)")
+    ax.set_title("S2 temperature-coefficient error: γ (power) faithful, "
+                 "β_oc (V_oc slope) ~10% off")
+    ax.legend(fontsize=8)
+    path = viz.save_fig(fig, "s2_tempcoeff_error")
+    print(f"  Figure -> {path.relative_to(config.PROJECT_ROOT)}")
+    print(f"  Table  -> results/s2_stc_table.csv")
