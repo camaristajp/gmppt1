@@ -22,14 +22,36 @@ from gmppt.device import ModuleParams, Breakdown, Bypass
 
 
 def pick_demo_module():
-    """A ~300 W c-Si module with cell count divisible by 3 (echoes Section 4)."""
+    """Reproduce the canonical-module selection criterion and assert the pin.
+
+    The criterion (also documented at config.CANONICAL_DEMO_MODULE): a c-Si
+    module with cell count divisible by 3 and STC power in 280-320 W, and among
+    those the one whose STC coefficient V_mp/V_oc is CLOSEST TO THE c-Si
+    POPULATION MEAN -- a median design, so the demo is representative rather than
+    a tail.
+
+    The result is pinned in config; this function verifies the pin still holds
+    against the current pool rather than re-deriving it silently. Selecting on
+    the coefficient (not power distance) is deliberate: many modules tie at
+    exactly 300 W with coefficients spanning 0.81-0.83, so a power-first sort
+    would let an alphabetical accident pick a non-median part.
+
+    Deterministic across machines: stable sort with an alphabetical index
+    tie-break so equal coefficient distances resolve by name, not platform sort.
+    """
     full = pvsystem.retrieve_sam("CECMod").T
     pool = pd.read_parquet(config.CEC_POOL)
     csi = pool[pool["Technology"].isin(config.CSI_TECHNOLOGIES)].copy()
     csi["N_s"] = pd.to_numeric(full.loc[csi.index, "N_s"], errors="coerce")
     csi["P"] = csi["V_mp_ref"] * csi["I_mp_ref"]
-    cand = csi[(csi["N_s"] % 3 == 0) & csi["P"].between(280, 320)]
-    return cand.sort_values("P").index[len(cand) // 2]
+    cand = csi[(csi["N_s"] % 3 == 0) & csi["P"].between(280, 320)].copy()
+    cand["coeff_dist"] = (cand["vmp_voc"] - config.CSI_COEFF_MEAN).abs()
+    picked = cand.sort_index().sort_values("coeff_dist", kind="stable").index[0]
+    assert picked == config.CANONICAL_DEMO_MODULE, (
+        f"Canonical-module criterion now selects {picked!r}, but the pin is "
+        f"{config.CANONICAL_DEMO_MODULE!r}. The CEC pool changed. Re-choose the "
+        f"pin deliberately in config.py and regenerate the S3 artefacts.")
+    return picked
 
 
 def round_sig(x, s=3):
@@ -104,9 +126,22 @@ def check_bypass_activation(mp):
 
 
 def check_reverse_bias_sweep(mp):
-    """Record the GMPP over a SWEPT RANGE of avalanche parameters (Stage 2
-    done-criterion: reverse-bias params recorded as a swept range). The bypass
-    clamps first, so the GMPP should be invariant across the plausible range."""
+    """Record the GMPP over a swept range of avalanche parameters, and diagnose
+    whether the avalanche knee is even reached in this regime.
+
+    IMPORTANT SCOPE. This checkpoint does NOT measure the influence of the
+    avalanche parameters on the GMPP. It confirms they CANNOT ACT here: under
+    uniform-within-substring shading the bypass diode clamps each shaded
+    substring near -0.6 V, an order of magnitude short of the -10..-30 V
+    breakdown knee, so the avalanche term is sampled only in its far tail. The
+    regime in which the parameters DO act - sub-substring shading, where a
+    single unshaded-group cell is driven deep into reverse bias with no bypass
+    path of its own - is not exercised by module_iv and is deferred to S6.
+
+    The diagnostic below prints the deepest substring voltage actually reached
+    at the GMPP operating point, so "the knee is off the operating path" is
+    shown rather than asserted.
+    """
     print("\n4) REVERSE-BIAS SWEEP  (GMPP vs avalanche parameters)")
     factors = [0.0, 1e-4, 1e-3, 5e-3, 1e-2, 5e-2]      # breakdown_factor range
     voltages = [-30.0, -20.0, -15.0, -10.0]            # breakdown_voltage range
@@ -126,13 +161,33 @@ def check_reverse_bias_sweep(mp):
                        columns=["breakdown_factor", "breakdown_voltage",
                                 "gmpp_W", "dev_pct"])
     tbl.to_csv(config.RESULTS_DIR / "s3_reverse_bias_sweep.csv", index=False)
+
+    # diagnostic: how deep in reverse bias does any substring actually sit at
+    # the module GMPP? If this is ~-0.6 V (bypass clamp) and the knee is -10 V,
+    # the avalanche term is provably off the operating path.
+    gmpp_I = device.analyse(device.module_iv(
+        mp, [1000, 600, 300], 25.0))["gmpp"]["I"]
+    frac = 1.0 / config.N_SUBSTRINGS
+    deepest = 0.0
+    for G in (1000.0, 600.0, 300.0):
+        sub = device.scale_to_substring(mp, frac)
+        v, i_elem = device.substring_element_iv(
+            sub, G, 25.0, Breakdown(factor=0.0), Bypass(temp_c=25.0))
+        v_at_gmpp = float(np.interp(gmpp_I, i_elem[::-1], v[::-1]))
+        deepest = min(deepest, v_at_gmpp)
+
     print(f"   swept {len(factors)}x{len(voltages)} = {len(records)} combinations")
     print(f"   base GMPP {base:.3f} W;  max deviation over the range: "
           f"{max_dev:.4f}%")
+    print(f"   deepest substring V at GMPP current: {deepest:+.3f} V "
+          f"(bypass clamp) vs knee {min(voltages):.0f} V "
+          f"-> avalanche term is {abs(min(voltages)/deepest):.0f}x deeper "
+          f"than the operating path")
     ok = max_dev < 0.5
-    print(f"   GMPP invariant across the swept range (<0.5%): "
-          f"{'OK' if ok else 'FAIL'}  -> avalanche params inert until near-"
-          f"threshold / sub-substring (S6)")
+    print(f"   GMPP CANNOT be moved by avalanche in this regime (dev<0.5%): "
+          f"{'OK' if ok else 'FAIL'}")
+    print(f"   NOTE: confirms the params are inert here; it does NOT measure "
+          f"their influence. Sub-substring shading (S6) is where they act.")
     return ok, tbl, base
 
 

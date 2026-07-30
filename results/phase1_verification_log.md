@@ -1,92 +1,199 @@
 # Phase 1 Verification Log
 
-Toolchain: Python 3.12, pvlib 0.15.2, matplotlib 3.11.1, CEC database
-(21,535 modules). Everything seeded; scripts in `phase1/`, outputs and figures
-in `results/`.
+**Provenance:** pvlib 0.15.2 (pinned) | CEC catalogue 21,535 rows | master seed
+20260901 | git 2d50235. Regenerated from a clean run of S1 -> S2 -> S3; every
+number below is reproduced by `make stage1 stage2`, not hand-transcribed. If the
+provenance line printed by a script disagrees with this header, the artefacts are
+stale and must be regenerated before they are trusted.
 
 Stages (see WORKFLOW.md): Stage 1 = S1+S2 (env + STC), Stage 2 = S3+S4 (shading
 physics + external validation), Stage 3 = S5 (array, standalone/early),
 Stage 4 = S6+S7+S8 (pipeline -> Gate A). Invariant: S4 green before any S6-S8.
 
 ## S1 - CEC coefficient characterisation (simulator-independent) - PASS
-Reads V_mp_ref/V_oc_ref from the CEC database; no device model involved.
+
+Reads V_mp_ref/V_oc_ref from the CEC database; no device model involved. Two
+populations are reported because they play different roles.
+
+**Full catalogue (all technologies)** - the Section 4 headline, reproduced exactly:
 
 | quantity | reproduced | Section 4 target |
 |---|---|---|
 | N | 21,535 | 21,535 |
-| range | 0.633-0.874 | 0.633-0.874 |
-| mean | 0.8096 | 0.810 |
+| range | 0.6333-0.8741 | 0.633-0.874 |
+| mean | 0.80957 | 0.810 |
 | s.d. | 0.01727 | 0.017 |
 | within +/-0.01 of 0.80 | 40.33% | 40.3% |
 
-Reproduces the preliminary premise exactly. C1's population claim stands on
-data independent of the simulator.
+**c-Si subset (Mono + Multi)** - the in-scope population (Section 8.2), and the
+one saved to `cec_pool.parquet`. Every downstream step draws from this file, so
+the technology filter is applied HERE, at pool construction, not at read time:
 
-## S2 - Single-diode STC verification (3 sig figs) - PASS
-CEC single-diode model (calcparams_cec -> singlediode), c-Si modules spanning
-the V_mp/V_oc range (both tails + middle).
+| quantity | value |
+|---|---|
+| N | 20,946 |
+| range | 0.6977-0.8719 |
+| mean | 0.81073 |
+| s.d. | 0.01520 |
+| within +/-0.01 of 0.80 | 41.00% |
 
-- **Gated (must match datasheet to 3 sig figs):** V_oc, V_mp, I_mp.
-  All match at 0.000% relative error across the span. PASS.
-- **I_sc - reported, not gated on datasheet:** model I_sc sits bracketed
-  between datasheet I_sc_ref and I_L_ref. The CEC database sets I_L_ref 0-5.6%
-  above I_sc_ref (median 0.14%, upper quartile >0.5%); series/shunt resistance
-  places the model value inside that bracket (at the low end for high-Rs / low
-  V_mp/V_oc modules, near I_L_ref for others). The datasheet offset is therefore
-  explained by the CEC parameterisation, not a simulator error, and is
-  immaterial to a voltage-based coefficient. Root cause verified against the
-  database directly, not assumed; enforced by test_isc_bracketed_by_iscref_and_ilref.
+The low tail of the full catalogue (down to 0.633) is thin-film, not outlier
+c-Si designs: filtering to c-Si raises the lower bound to 0.698 and tightens the
+s.d. from 0.0173 to 0.0152. The premise (0.80 is a population average most
+modules miss) survives the filter: 59% of c-Si modules are more than +/-0.01
+from 0.80. The frozen c-Si constants live in `config.py` (CSI_POOL_N,
+CSI_COEFF_MEAN, CSI_COEFF_SD, CSI_COEFF_RANGE) and S1 asserts the catalogue row
+count against CEC_ROWS_EXPECTED so a pvlib/database change cannot pass silently.
 
-### OPEN CAVEAT - temperature coefficients do NOT reach 3 sig figs
-The plan asks for temperature coefficients "to three significant figures".
-Under the standard CEC model this is not achievable, because beta_oc and
-gamma_r are not inputs - they are emergent from the bandgap model and the fit:
+## S2 - Single-diode STC verification - PASS (implementation verification at STC)
 
-| coeff | model vs datasheet | note |
+CEC single-diode model (calcparams_cec -> singlediode) on c-Si modules spanning
+the V_mp/V_oc range (both tails + middle), selected deterministically
+(percentile-style span, stable sort with alphabetical tie-break).
+
+**What S2 establishes, and what it does not.** The CEC six-parameter set is
+extracted so the model passes through the datasheet STC point. Reproducing that
+point to 3 sig figs therefore confirms the model is *called correctly* (right
+parameters, bandgap defaults, no unit errors) - it is implementation
+verification, not physical validation. Physical validation of the shaded/off-STC
+regime is S4 (published shading cases) and Phase 8 (measured I-V), per the
+invariant.
+
+- **Gated (must match datasheet to 3 sig figs): V_oc, V_mp, I_mp.** All match at
+  0.000% relative error across the span. PASS.
+- **I_sc - reported, not gated.** Model I_sc sits bracketed between datasheet
+  I_sc_ref and I_L_ref (the CEC fit sets I_L_ref >= I_sc_ref; series/shunt
+  resistance places the model value inside). Datasheet offset 0.00-1.00% is a
+  fit convention, immaterial to a voltage coefficient. Enforced by
+  test_isc_bracketed_by_iscref_and_ilref.
+
+### Temperature coefficients - NOT gated (plan Section 9.2 amended)
+
+The original plan text asked for temperature coefficients "to three significant
+figures". **This is not achievable under the CEC parameterisation and the gate
+was amended** (plan rev: Section 9.2 now gates on the STC operating point, with
+the reason recorded here). Only 0.19% of c-Si modules (39 of 20,946) could pass
+a 3-sig-fig beta_oc gate, so the criterion was unsatisfiable on any
+representative span.
+
+Measured across the S2 span:
+
+| coeff | deviation vs datasheet | note |
 |---|---|---|
-| alpha_sc | ~5-15% off | used indirectly; I_sc temp slope |
-| beta_oc | ~5-15% off | V_oc temp slope - **relevant to the coefficient's T-trend** |
-| gamma_r | <1.5% off | P_mp temp slope - drives landing-point energy |
+| alpha_sc | 7.8-14.5% | I_sc temp slope; == \|Adjust\| (see below) |
+| beta_oc | 7.7-14.8% | **V_oc temp slope - relevant to the coefficient T-trend** |
+| gamma_r | 0.3-0.8% | P_mp temp slope; drives landing-point energy |
 
-Consequence: gamma_r (power) is faithful, so landing-point energy vs
-temperature is trustworthy. beta_oc being ~10% off means the *absolute*
-temperature trend of V_mp/V_oc (Finding 1) carries a modelling bias, so:
-  (a) Task 1 reports the T-trend in normalised as well as absolute terms
-      (already planned - this is the cheap test), and treats the absolute
-      slope as indicative, not exact;
-  (b) the T-trend is cross-checked against the partner's measured I-V at
-      temperature in Phase 8 before any temperature-as-a-feature claim is
-      made load-bearing.
-DECISION NEEDED (see chat): accept emergent temp coeffs + document, or fit
-EgRef/dEgdT per module to tighten beta_oc. Recommendation: accept + document;
-the study's coefficient question is answered in normalised terms regardless.
+**The beta_oc deviation is not noise - it equals \|Adjust\|.** Verified
+database-wide (400 random c-Si, max residual 3.6e-4, correlation 0.99999981):
 
-## Status
-S1, S2, S3 PASS (12 tests). Simulator now produces the multi-peak characteristic.
-Not yet done: S4 (published-shading reproduction = verification step 2), S5
-(array generalisation), S6-S8. Gate A cannot be evaluated until S6-S8 complete.
+    beta_oc(model) / beta_oc(datasheet) - 1  ==  Adjust / 100
+
+`Adjust` is the CEC parameter that reconciles the fit's alpha_sc to the
+datasheet; the same fit produces a beta_oc that misses the datasheet by exactly
+that ratio. So the ~10% is a documented, per-module-computable property of the
+parameterisation, printed inline in the S2 output as a check. Consequences:
+
+- gamma_r (power) is faithful, so landing-point *energy* vs temperature is
+  trustworthy;
+- beta_oc (voltage) carries a bounded bias: across all c-Si, the implied
+  \|V_oc error\| at 60 C is median 0.465 V, p90 0.844 V, p99 1.421 V; as a
+  candidate-placement error (x0.8) that is median 0.372 V, and **31.5% of c-Si
+  modules exceed the 0.47 V Task 3 MAE target from this source alone**;
+- therefore Task 1 reports the T-trend in normalised as well as absolute terms
+  (already planned), the absolute slope is treated as indicative, and the trend
+  is cross-checked against partner measured I-V at temperature in Phase 8 before
+  any temperature-as-a-feature claim is made load-bearing. Held-out modules are
+  stratified by \|Adjust\| so instrument bias is separable from the physical
+  trend.
 
 ## S3 - reverse-bias (Bishop) + bypass diodes - PASS
-Module = 3 substrings in series, each a cell-fraction-scaled single-diode model
-(a_ref, R_s, R_sh_ref scaled by 1/3; I_L_ref, I_o_ref, alpha_sc unchanged),
-extended into reverse bias by pvlib bishop88, shunted by an anti-parallel bypass
-diode (I0=1e-9 A, n=1). Composed in the current domain: I_elem(V) = I_substring(V)
-+ I_bypass(V), inverted to V(I), summed across substrings.
+
+Canonical module **Canadian_Solar_Inc__CS6U_310P** (72-cell, 310.1 W,
+V_mp/V_oc = 0.8107 == the c-Si population mean to four decimals - a median
+design, pinned in config.CANONICAL_DEMO_MODULE and selected on coefficient
+proximity to the mean, not power). Module = 3 substrings in series, each a
+cell-fraction-scaled single-diode model (a_ref, R_s, R_sh_ref scaled by 1/3;
+I_L_ref, I_o_ref, alpha_sc unchanged), extended into reverse bias by pvlib
+bishop88, shunted by an anti-parallel bypass diode (I0=1e-9 A, n=1). Composed in
+the current domain: I_elem(V) = I_substring(V) + I_bypass(V), inverted to V(I),
+summed across substrings.
 
 Four checkpoints, all enforced by tests (test_s3_device.py):
-1. UNSHADED CONSISTENCY - 3 uniform substrings reproduce the direct single-diode
-   module to 3 sig figs: P_mp exact (0.0000%), V_oc/I_sc/V_mp/I_mp all OK. This
-   proves the scaling + composition are correct.
-2. MULTI-PEAK - substrings at 1000/600/300 W/m^2 give 3 peaks; GMPP = 125.5 W at
-   25.1 V (mid-curve), vs 100.8 W at the rightmost peak the fixed-0.8 model
-   targets. Staircase confirmed (bypass switching at ~40->28 V and ~24->13 V).
-3. BYPASS ACTIVATION - a 200 W/m^2 substring forced to the bright Isc clamps at
-   -0.582 V, as expected for a ~0.6 V bypass diode.
-4. REVERSE-BIAS INSENSITIVITY - turning avalanche on (factor 2e-3) vs off moves
-   GMPP by 0.000%. The bypass clamps long before avalanche, so the uncertain
-   reverse-bias parameters (a named limitation) are inert in normal multi-peak
-   operation and matter only near-threshold / under sub-substring shading (S6).
-   Default is breakdown_factor=0; the parameters are exposed for the S6 sweep.
 
-Reverse-bias parameters are documented as an explicit assumption, not fitted.
-Bypass diode I0/n are stated parameters, exposed for sensitivity.
+1. **UNSHADED CONSISTENCY** - three uniform substrings reproduce the direct
+   single-diode module: P_mp exact (0.0000%), V_oc/I_sc exact, V_mp/I_mp to
+   0.017%. Proves the scaling + composition are correct. (Note: with three
+   identical substrings this exercises the series sum but not the bypass path;
+   the shaded-path validation is S4.)
+2. **MULTI-PEAK** - substrings at 1000/600/300 W/m^2 give 3 peaks at
+   11.06 / 25.06 / 39.81 V, separated by ~14 V (not grid artefacts). GMPP =
+   131.61 W at 25.06 V (region 2, two substrings active), vs 105.66 W at the
+   rightmost peak the fixed-0.8 model targets. Substring Isc ratios 9.08 / 5.451
+   / 2.726 = 1.000 / 0.600 / 0.300, confirming linear photocurrent scaling. The
+   peak detector now applies a prominence (1% of GMPP) and separation (1 V)
+   criterion so near-threshold flattening cannot inflate the count at S6/S7.
+3. **BYPASS ACTIVATION** - a 200 W/m^2 substring forced to the bright Isc clamps
+   at -0.583 V, as expected for a ~0.6 V bypass diode. (Algebraic by
+   construction with I0=1e-9, n=1; confirms wiring, not cell physics. I0 is a
+   stated assumption exposed for the S6 sweep; the partner's actual bypass part
+   number is on the Month-1 data request.)
+4. **REVERSE-BIAS SWEEP - scope corrected.** Swept 6x4 = 24 avalanche
+   combinations (breakdown_factor 0..5e-2, breakdown_voltage -10..-30 V); base
+   GMPP 131.611 W, max deviation 0.020%. **This confirms the avalanche
+   parameters CANNOT ACT in this regime; it does NOT measure their influence.**
+   Diagnostic: the deepest substring voltage at the GMPP current is -0.556 V
+   (bypass clamp), 54x shallower than the -30 V knee, so the avalanche term is
+   sampled only in its far tail. The substring voltage grid floor is now
+   adaptive (reaches ~95% of the knee when avalanche is on, vs a fixed -2.0 V
+   that clipped the knee off-grid and made the sweep vacuous), and module_iv
+   asserts the operating region stays finite. The regime where these parameters
+   DO act - sub-substring shading, a single unshaded-group cell driven deep into
+   reverse bias with no bypass path - is not represented by the current
+   one-irradiance-per-substring module_iv and is deferred to S6.
+
+**Per-region deviation of the fixed-0.8 model (canonical module, this scenario).**
+Fixed candidates n*0.8*Voc/3 (Voc=44.90) vs the true peaks:
+
+| region (active substrings) | fixed | true | error | implied coeff | bypass-corrected coeff |
+|---|---|---|---|---|---|
+| 1 (brightest only) | 11.97 | 11.06 | -0.91 | 0.739 | 0.817 |
+| 2 (GMPP) | 23.95 | 25.06 | +1.11 | 0.837 | 0.857 |
+| 3 (all three) | 35.92 | 39.81 | +3.89 | 0.887 | 0.887 |
+
+Three findings for the research, all measured not asserted:
+- **The GMPP error is +1.11 V, not the "11 V" a single-candidate 0.8*Voc reading
+  suggests** - the fixed model selects the correct region here (consistent with
+  Section 4's 153/153). Recording the module-level error as ~1 V, not ~11 V,
+  keeps C2's honest baseline honest.
+- **The region-1 error is negative** while regions 2-3 are positive. Section 4's
+  "always positive" holds for the GMPP but not per region, and deep two-substring
+  shading puts the GMPP in region 1 - so Task 1 must report error by region
+  before C1 asserts a directional prior.
+- **Part of the error is deterministic and free to remove.** Adding back the
+  (3-n) bypass drops tightens the implied coefficient spread from 0.739-0.887 to
+  0.817-0.887. C2's baseline is therefore "recalibrated alpha + closed-form
+  bypass correction", which raises the bar Gate A(ii) must clear. The residual
+  0.817/0.857/0.887 spread within one curve is the sharp argument for C3: no
+  scalar alpha serves all three regions, which is why the ordered scan
+  trajectory carries information a single irradiance-keyed lookup discards.
+- Flank asymmetry at the GMPP peak: ~2.5 W/V below vs ~5.6 W/V above, so
+  overshoot costs ~2x undershoot -> Phase 3 fitting loss and Phase 4 quantile
+  interval should be asymmetric.
+
+## Status
+
+S1, S2, S3 PASS (15 tests, no leaked warnings under -W error::RuntimeWarning).
+Simulator produces the multi-peak characteristic and the canonical module is
+pinned and reproducible across machines.
+
+**Not yet done:** S4 (published-shading reproduction = verification step 2), S5
+(array generalisation), S6-S8. Gate A cannot be evaluated until S6-S8 complete,
+and S4 must be green before any S6-S8 step runs (invariant).
+
+**Open items carried to later phases** (recorded so they are not silently
+dropped): (a) sub-substring cell-group composition inside module_iv, required
+for Gate A(i)'s region-error-rate-under-sub-substring-geometry test - blocks S6;
+(b) temperature-dependent bypass I0 and its addition to the S6 sweep; (c) the
+plan-text amendment to Section 9.2 (temperature-coefficient gate) and Section 4
+(c-Si vs full-catalogue figures, "outlier designs" wording).

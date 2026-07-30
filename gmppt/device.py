@@ -24,6 +24,7 @@ substring long before avalanche; they are exposed here so the sensitivity study
 required by the plan can sweep them.
 """
 from __future__ import annotations
+import warnings
 from dataclasses import dataclass, field
 import numpy as np
 import pandas as pd
@@ -118,17 +119,53 @@ def substring_element_iv(sub, G, T, bd: Breakdown, bp: Bypass, n_v=4000):
     """Terminal I-V of (substring || bypass) over a fine voltage grid.
 
     Returns (v, i_elem) with v ascending and i_elem strictly decreasing.
+
+    The grid floor is adaptive: it reaches past the avalanche knee
+    (bd.voltage, typically -10 to -30 V) whenever the avalanche term is active,
+    so the breakdown region is actually representable. A fixed -2.0 V floor
+    silently clips the knee off the grid and makes any breakdown-voltage sweep
+    vacuous - the term is never sampled, so the GMPP looks invariant to it by
+    construction rather than by physics. With avalanche off (bd.factor == 0) the
+    bypass diode clamps near -0.6 V and a shallow floor is sufficient.
     """
     IL, I0, Rs, Rsh, nNsVth = substring_operating_params(sub, G, T)
     # forward open-circuit voltage sets the upper end of the grid
     fwd = pvsystem.singlediode(IL, I0, Rs, Rsh, nNsVth)
     v_oc = float(fwd["v_oc"])
-    v = np.linspace(-2.0, v_oc * 1.02, n_v)
-    i_sub = singlediode.bishop88_i_from_v(
-        v, IL, I0, Rs, Rsh, nNsVth,
-        breakdown_factor=bd.factor, breakdown_voltage=bd.voltage,
-        breakdown_exp=bd.exp)
+    # Reach the breakdown knee when avalanche is on, but stop just ABOVE
+    # bd.voltage: the Bishop term (1 - V/V_br)^-exp is only defined for
+    # V > V_br, and below the knee the substring's bypass diode has long since
+    # clamped it out of the operating path anyway. Sampling to ~95% of the knee
+    # makes the onset representable without evaluating the term where it is
+    # numerically undefined. With avalanche off, a shallow floor suffices
+    # (bypass clamps near -0.6 V).
+    v_floor = min(-2.0, 0.95 * bd.voltage) if bd.factor > 0 else -2.0
+    v = np.linspace(v_floor, v_oc * 1.02, n_v)
+    # The Bishop solver may not converge at the handful of samples right at the
+    # avalanche knee (a stiff region far below the operating path). Those samples
+    # sit in deep reverse bias where the substring is bypass-clamped and never
+    # carries operating current, so their exact value is immaterial to the module
+    # curve; suppress the benign convergence warning locally rather than letting
+    # it mask a real one elsewhere. Verified: the operating region (V>=0) is
+    # always finite (asserted downstream in module_iv).
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore", message="some failed to converge", category=RuntimeWarning)
+        warnings.filterwarnings(
+            "ignore", message="invalid value encountered in power",
+            category=RuntimeWarning)
+        i_sub = singlediode.bishop88_i_from_v(
+            v, IL, I0, Rs, Rsh, nNsVth,
+            breakdown_factor=bd.factor, breakdown_voltage=bd.voltage,
+            breakdown_exp=bd.exp)
     i_elem = np.asarray(i_sub) + bp.current(v)
+    # Operating-path guarantee: currents at and above V=0 must be finite. If the
+    # knee's non-convergence ever leaked upward into the operating region this
+    # would catch it rather than letting a NaN propagate into the module curve.
+    if not np.isfinite(i_elem[v >= 0.0]).all():
+        raise FloatingPointError(
+            "non-finite substring current in the operating region (V>=0); "
+            "breakdown solver instability reached the operating path.")
     return v, i_elem
 
 
@@ -171,11 +208,25 @@ def module_iv(mp: ModuleParams, irradiances, T,
     I = np.linspace(0.0, i_max, n_points)
 
     # invert each substring's element I-V to V(I) and sum
+    #
+    # np.interp CLAMPS to the endpoint outside [i_asc.min, i_asc.max] rather
+    # than raising, so a substring forced beyond its grid would silently return
+    # the grid-edge voltage and corrupt the module curve with no error. The
+    # common current grid runs 0..isc.max, and every substring's element curve
+    # carries current from its own reverse-bias floor (I high) up through I=0 at
+    # v_oc; the requested range is representable as long as isc.max does not
+    # exceed any element's reverse-bias current at the grid floor. Assert it.
     V = np.zeros_like(I)
     for (v, i_elem) in elems:
         # i_elem strictly decreasing in v -> ascending when reversed
         i_asc = i_elem[::-1]
         v_asc = v[::-1]
+        if I.max() > i_asc.max() + 1e-6 or I.min() < i_asc.min() - 1e-6:
+            raise ValueError(
+                f"module current grid [{I.min():.3f}, {I.max():.3f}] A exceeds a "
+                f"substring's representable range [{i_asc.min():.3f}, "
+                f"{i_asc.max():.3f}] A; np.interp would clamp silently. Widen the "
+                f"substring voltage grid (see substring_element_iv v_floor).")
         V += np.interp(I, i_asc, v_asc)
 
     P = V * I
@@ -185,18 +236,66 @@ def module_iv(mp: ModuleParams, irradiances, T,
 # --------------------------------------------------------------------------
 # Curve analysis
 # --------------------------------------------------------------------------
-def analyse(curve: dict):
-    """Global peak and local maxima of a module P-V/P-I curve."""
+def analyse(curve: dict, prominence_frac=0.01, min_separation_v=1.0):
+    """Global peak and local maxima of a module P-V/P-I curve.
+
+    A raw index-comparison local-maximum test inflates the peak count under two
+    conditions the study deliberately probes: numerical jitter on the dense grid,
+    and near-threshold irradiance ratios where the curve flattens between shelves
+    (a single physical shelf then reads as several adjacent maxima). Two criteria
+    suppress both without discarding genuine peaks:
+
+      * PROMINENCE. A candidate must rise at least `prominence_frac` of the
+        global-peak power above the higher of the two troughs flanking it (the
+        deepest point between it and the nearest higher peak on each side).
+      * SEPARATION. Peaks within `min_separation_v` volts are merged, keeping the
+        more powerful; distinct bypass shelves are ~10 V apart, so 1 V is safely
+        below the physical spacing while removing grid-adjacent duplicates.
+
+    Defaults (1% prominence, 1 V separation) leave the clean three-shelf demo
+    untouched and only bite on flattened / jittery curves. Both are exposed so
+    S7 can tune them against scenarios whose true peak count is known.
+    """
     I, V, P = curve["I"], curve["V"], curve["P"]
     # restrict to the physical operating region (V >= 0)
     mask = V >= 0
     Im, Vm, Pm = I[mask], V[mask], P[mask]
     g = int(np.argmax(Pm))
-    # local maxima in P vs V (V decreasing as I increases, so scan P)
-    peaks = []
+    p_thresh = prominence_frac * float(Pm[g])
+
+    # raw local maxima (index comparison)
+    raw = []
     for j in range(1, len(Pm) - 1):
         if Pm[j] >= Pm[j - 1] and Pm[j] > Pm[j + 1]:
-            peaks.append((float(Vm[j]), float(Im[j]), float(Pm[j])))
+            raw.append(j)
+
+    # prominence: rise above the deeper flanking trough out to the nearest
+    # strictly-higher sample on each side (bounded local prominence).
+    def prominence(j):
+        pj = Pm[j]
+        li = j
+        while li > 0 and Pm[li - 1] <= pj:
+            li -= 1
+        ri = j
+        while ri < len(Pm) - 1 and Pm[ri + 1] <= pj:
+            ri += 1
+        left_trough = Pm[li:j + 1].min() if j > li else pj
+        right_trough = Pm[j:ri + 1].min() if ri > j else pj
+        return pj - max(left_trough, right_trough)
+
+    kept = [j for j in raw if prominence(j) >= p_thresh or j == g]
+
+    # separation merge: within min_separation_v volts, keep the stronger.
+    kept.sort(key=lambda j: Vm[j])
+    merged = []
+    for j in kept:
+        if merged and abs(Vm[j] - Vm[merged[-1]]) < min_separation_v:
+            if Pm[j] > Pm[merged[-1]]:
+                merged[-1] = j
+        else:
+            merged.append(j)
+
+    peaks = [(float(Vm[j]), float(Im[j]), float(Pm[j])) for j in merged]
     return dict(
         gmpp=dict(V=float(Vm[g]), I=float(Im[g]), P=float(Pm[g])),
         n_peaks=len(peaks),

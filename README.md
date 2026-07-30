@@ -25,7 +25,7 @@ that prefer it; `requirements-lock.txt` is the full transitive freeze.
 
 ```
 gmppt/        package: config (paths, seeds, FIXED protocol constants)
-scripts/      one runnable file per phase step (s1_, s2_, ...)
+phase1/       one runnable file per phase step (s1_, s2_, s3_, ...)
 tests/        each verification checkpoint, re-runnable as a pytest test
 results/      generated outputs + the verification log (regenerated from code)
 ```
@@ -33,8 +33,9 @@ results/      generated outputs + the verification log (regenerated from code)
 ## Reproducing Phase 1 so far
 
 ```bash
-python scripts/s1_cec_characterisation.py   # CEC V_mp/V_oc spread (Section 4)
-python scripts/s2_stc_verification.py        # single-diode STC, 3 sig figs
+python phase1/s1_cec_characterisation.py   # CEC V_mp/V_oc spread (Section 4)
+python phase1/s2_stc_verification.py        # single-diode STC, 3 sig figs
+python phase1/s3_reverse_bias_bypass.py     # reverse-bias + bypass, multi-peak
 ```
 
 ## Fixed protocol constants (Section 9.10)
@@ -47,7 +48,7 @@ fallback margin 1 % of operating power.
 
 | stage | S-steps | what | state |
 |---|---|---|---|
-| 1 | S1, S2 | environment + STC verification | PASS |
+| 1 | S1, S2 | environment + STC verification (STC operating point; temp coeffs documented) | PASS |
 | 2 | S3, S4 | shading physics + external validation | S3 PASS, S4 pending source cases |
 | 3 | S5 | array generalisation (standalone, scheduled early) | not started |
 | 4 | S6–S8 | scenarios → labelling → characterisation → Gate A | not started (blocked on S4) |

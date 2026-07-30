@@ -59,10 +59,11 @@ def verify_module(row):
     # voltage-based coefficient.
     isc = m["i_sc"]
     rel_ds = abs(isc - row["I_sc_ref"]) / row["I_sc_ref"] * 100
+    rel_il = abs(isc - row["I_L_ref"]) / row["I_L_ref"] * 100
     tol = 1e-3
     bracketed = (row["I_sc_ref"] * (1 - tol) <= isc <= row["I_L_ref"] * (1 + tol))
     rows.append(("I_sc", isc, row["I_sc_ref"], rel_ds, bracketed, False))
-    rows.append(("  (I_L_ref)", isc, row["I_L_ref"], 0.0, bracketed, False))
+    rows.append(("  (I_L_ref)", isc, row["I_L_ref"], rel_il, bracketed, False))
 
     # Temperature coefficients (emergent from the fit -> checked, reported as
     # approximate; not held to 3 sig figs).
@@ -79,9 +80,14 @@ def verify_module(row):
 
 
 def pick_span(df, n_mid=4):
-    """c-Si modules spanning the V_mp/V_oc range: min, max, and mid samples."""
+    """c-Si modules spanning the V_mp/V_oc range: min, max, and mid samples.
+
+    Deterministic across machines: sort by name first, then a stable sort by the
+    ratio, so tied V_mp/V_oc values break alphabetically rather than by platform
+    sort order.
+    """
     csi = df[df["Technology"].isin(config.CSI_TECHNOLOGIES)].copy()
-    csi = csi.sort_values("vmp_voc")
+    csi = csi.sort_index().sort_values("vmp_voc", kind="stable")
     picks = [csi.iloc[0], csi.iloc[-1]]              # both tails
     mids = csi.iloc[len(csi)//4 : 3*len(csi)//4]
     picks += [mids.iloc[i] for i in
@@ -98,6 +104,7 @@ if __name__ == "__main__":
 
     span = pick_span(pool)
     print("S2  Single-diode STC verification (3 sig figs)")
+    print("  " + config.provenance())
     print("=" * 74)
     gate_ok = True
     isc_ds_offsets = []
@@ -122,18 +129,42 @@ if __name__ == "__main__":
             print(f"  {name:14s} {got:10.4f} {ref:10.4f} {rel:8.3f}  "
                   f"{tag}{note}")
         print("  temp coeffs (reported, emergent from fit):")
+        adj = float(row["Adjust"])
         for name, got, ref in tc:
             rel = abs(got - ref) / abs(ref) * 100 if ref else float('nan')
             tc_records.append((short, name, rel))
-            print(f"    {name:9s} {got:+10.5f} {ref:+10.5f}  ({rel:5.1f}% off)")
+            extra = ""
+            if name == "beta_oc":
+                # The CEC fit reproduces datasheet beta_oc only up to the Adjust
+                # parameter: beta_model/beta_ref - 1 == Adjust/100 (verified
+                # database-wide). So the deviation is a documented property of the
+                # parameterisation, not simulator noise, and equals |Adjust|.
+                extra = f"  [Adjust={adj:+.2f} -> predicts {abs(adj):.1f}% off]"
+            print(f"    {name:9s} {got:+10.5f} {ref:+10.5f}  "
+                  f"({rel:5.1f}% off){extra}")
+
+    # computed temp-coeff ranges (no hardcoded figures)
+    tcdf_sum = pd.DataFrame(tc_records, columns=["module", "coeff", "pct"])
+    def _rng(c):
+        s = tcdf_sum[tcdf_sum.coeff == c]["pct"]
+        return s.min(), s.max()
+    a_lo, a_hi = _rng("alpha_sc")
+    b_lo, b_hi = _rng("beta_oc")
+    g_lo, g_hi = _rng("gamma_r")
 
     print("\n" + "=" * 74)
-    print(f"S2 STC checkpoint: {'PASS' if gate_ok else 'FAIL'}")
+    print(f"S2 STC checkpoint: {'PASS' if gate_ok else 'FAIL'}  "
+          f"(gate = STC operating point: V_oc, V_mp, I_mp to 3 sig figs)")
     print("  Gated: V_oc, V_mp, I_mp match datasheet to 3 sig figs across the span.")
-    print(f"  Reported: model I_sc follows I_L_ref (3 sig figs); datasheet I_sc "
-          f"offset {min(isc_ds_offsets):.2f}-{max(isc_ds_offsets):.2f}% is a CEC")
+    print(f"  Reported: model I_sc follows I_L_ref; datasheet I_sc offset "
+          f"{min(isc_ds_offsets):.2f}-{max(isc_ds_offsets):.2f}% is a CEC")
     print("  fit convention (I_L_ref>=I_sc_ref), immaterial to a voltage coefficient.")
-    print("  Temp coeffs: emergent, ~5-15% (alpha_sc/beta_oc), <1.5% (gamma_r).")
+    print(f"  Temp coeffs (NOT gated -- emergent, not datasheet-reproducible under")
+    print(f"  the CEC parameterisation): alpha_sc {a_lo:.1f}-{a_hi:.1f}%, "
+          f"beta_oc {b_lo:.1f}-{b_hi:.1f}%, gamma_r {g_lo:.1f}-{g_hi:.1f}%.")
+    print(f"  beta_oc deviation == |Adjust| (verified identity): the V_oc temp")
+    print(f"  slope carries a documented, bounded bias -> temperature claims in")
+    print(f"  Sections 4/7/9 report normalised as well as absolute, per plan.")
 
     # Table -> CSV
     tbl = pd.DataFrame(stc_table,
@@ -160,8 +191,8 @@ if __name__ == "__main__":
     ax.set_xticks(x)
     ax.set_xticklabels([m[:14] for m in mods], rotation=30, ha="right", fontsize=8)
     ax.set_ylabel("|error| vs datasheet (%)")
-    ax.set_title("S2 temperature-coefficient error: γ (power) faithful, "
-                 "β_oc (V_oc slope) ~10% off")
+    ax.set_title("S2 temp-coeff error: γ (power) faithful; "
+                 "β_oc (V_oc slope) deviation = |Adjust|")
     ax.legend(fontsize=8)
     path = viz.save_fig(fig, "s2_tempcoeff_error")
     print(f"  Figure -> {path.relative_to(config.PROJECT_ROOT)}")

@@ -13,6 +13,7 @@ Two kinds of constant live here:
 """
 from __future__ import annotations
 import hashlib
+import subprocess
 from pathlib import Path
 
 # --------------------------------------------------------------------------
@@ -69,5 +70,72 @@ DEG_DT = -0.0002677            # eV/K
 N_SUBSTRINGS = 3               # conventional full-cell c-Si, three bypass diodes
 CSI_TECHNOLOGIES = ("Mono-c-Si", "Multi-c-Si")
 
+# --------------------------------------------------------------------------
+# CEC population reference (c-Si only; the study's in-scope population)
+# --------------------------------------------------------------------------
+# These are frozen from S1 on the pinned pvlib/CEC toolchain (see PVLIB_PIN,
+# CEC_ROWS_EXPECTED below). The full-catalogue figures (all technologies) are
+# 21,535 modules, 0.633-0.874, mean 0.810, s.d. 0.017; the in-scope c-Si subset
+# is the one every downstream step draws from. Recompute and re-freeze these two
+# constants only if the toolchain pins change.
+CSI_POOL_N = 20946             # c-Si modules in the S1 pool (Mono + Multi)
+CSI_COEFF_MEAN = 0.8107        # c-Si population mean V_mp/V_oc at STC (S1)
+CSI_COEFF_SD = 0.0152          # c-Si population s.d.
+CSI_COEFF_RANGE = (0.6977, 0.8719)   # c-Si population min/max
+
+# Canonical demonstration module (S3 figures, S3 tests).
+#
+# Selected ONCE and pinned here so the S3 figure and every S3 number are
+# identical on every machine. Selection criterion, in order:
+#   (1) c-Si, cell count divisible by 3 (a clean three-substring part);
+#   (2) STC power within 280-320 W (echoes the Section 4 300 W module);
+#   (3) among those, the module whose STC coefficient V_mp/V_oc is closest to
+#       the c-Si population mean CSI_COEFF_MEAN -- i.e. a *median* design, not a
+#       tail, so the demo is representative rather than anecdotal.
+# The name is pinned as a string (not recomputed at run time) so the S3 tests do
+# not depend on the S1 pool artefact existing on disk, and so database growth
+# cannot silently move the canonical module underneath the recorded figures.
+# `phase1/s3_reverse_bias_bypass.py: pick_demo_module()` reproduces the criterion
+# and asserts it still selects this module; if the assertion ever fails, the pin
+# is re-chosen deliberately and the S3 artefacts regenerated.
+CANONICAL_DEMO_MODULE = "Canadian_Solar_Inc__CS6U_310P"
+# ^ coefficient 0.8107, equal to the c-Si population mean to four decimals (the
+#   closest-to-mean candidate in the 280-320 W, N_s%3==0 band). 33 candidates
+#   tie at this minimum coefficient distance, all at coeff 0.8107; the
+#   alphabetical index tie-break settles them deterministically here. A power-
+#   first selection would instead have picked a 300 W part at coeff 0.813, off
+#   the mean, purely by naming accident -- hence selecting on the coefficient.
+
 # Verification tolerance
 STC_SIG_FIGS = 3               # datasheet reproduction requirement (Section 9.2)
+
+# --------------------------------------------------------------------------
+# Toolchain provenance (stamped onto every S-step output)
+# --------------------------------------------------------------------------
+PVLIB_PIN = "0.15.2"           # the CEC database ships with pvlib; pin it
+CEC_ROWS_EXPECTED = 21535      # full CEC catalogue row count on the pinned pvlib
+
+
+def git_hash() -> str:
+    """Short git commit of the working tree, or 'nogit' if unavailable."""
+    try:
+        out = subprocess.run(
+            ["git", "-C", str(PROJECT_ROOT), "rev-parse", "--short", "HEAD"],
+            capture_output=True, text=True, timeout=5)
+        return out.stdout.strip() or "nogit"
+    except Exception:
+        return "nogit"
+
+
+def provenance() -> str:
+    """One-line provenance stamp for output headers and the verification log.
+
+    Records the toolchain that produced a result so stale artefacts are visible
+    at a glance rather than silently diverging from the code.
+    """
+    import pvlib
+    tag = "OK" if pvlib.__version__ == PVLIB_PIN else \
+        f"MISMATCH(pinned {PVLIB_PIN})"
+    return (f"pvlib {pvlib.__version__} [{tag}] | "
+            f"CEC rows expected {CEC_ROWS_EXPECTED} | "
+            f"seed {MASTER_SEED} | git {git_hash()}")

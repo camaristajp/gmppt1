@@ -5,13 +5,12 @@ from pvlib import pvsystem
 
 from gmppt import config, device
 from gmppt.device import ModuleParams, Breakdown, Bypass
-
-MODULE = "Hanwha_Q_CELLS__Qidong__HSL72P6_PC_3_295QW"  # 72-cell, ~295 W
+import s3_reverse_bias_bypass as s3
 
 
 @pytest.fixture(scope="module")
 def mp():
-    return ModuleParams.from_cec(MODULE)
+    return ModuleParams.from_cec(s3.pick_demo_module())
 
 
 def test_unshaded_composition_matches_direct_module(mp):

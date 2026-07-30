@@ -9,7 +9,7 @@ convergence check — each S-step still proves its own number before the next.
 
 | Stage | S-steps | What | Done when |
 |---|---|---|---|
-| 1 | S1, S2 | Environment + STC verification | S1 reproduces the CEC spread; S2 gated quantities (V_oc, V_mp, I_mp) match datasheet to 3 sig figs across the design span. **DONE.** |
+| 1 | S1, S2 | Environment + STC verification | S1 reproduces the full-catalogue CEC spread AND saves the c-Si-only pool (in-scope population); S2 gated quantities (V_oc, V_mp, I_mp — the STC operating point) match datasheet to 3 sig figs across the design span. **Gate amended:** temperature coefficients are *not* held to 3 sig figs — unachievable under the CEC parameterisation (only 0.19% of c-Si modules qualify), the beta_oc deviation equals \|Adjust\| and is carried as a documented bias, not a failure. See plan Section 9.2 and the verification log. **DONE.** |
 | 2 | S3, S4 | Shading physics + external validation | Stepped I-V / multi-peak P-V correct, reverse-bias params recorded as a **swept range**; Basoglu + one baseline reproduce to reported precision. (S3 done; S4 pending source cases.) |
 | 3 | S5 | Array generalisation | Single module is the N=1 special case; a short string composes correctly. Standalone (see note). |
 | 4 | S6, S7, S8 | Scenario gen -> labelling -> characterisation -> **Gate A** | S6 seeded generator + by-module split; S7 GMPP labelling passes its step-halving convergence check; S8 statistics converge and the three headline numbers (coefficient distribution, region-error rate, worst case in watts) are stable. Ends in Gate A. |
@@ -22,6 +22,13 @@ convergence check — each S-step still proves its own number before the next.
    merged stage and only test at the end. Each S-step is proven before the next.
 3. Every S-step keeps its own convergence check: S7 step-halving on the dense
    sweep; S8 statistics-convergence on scenario count.
+4. **Determinism across machines.** The c-Si pool, the S2 span, and the S3
+   canonical module are all selected by stable sorts with alphabetical
+   tie-breaks; the canonical module is pinned in `config.CANONICAL_DEMO_MODULE`
+   and its selection criterion re-asserted at run time. Every S-step output
+   carries a `config.provenance()` stamp (pvlib version, CEC row count, seed,
+   git hash) so a stale artefact is visible rather than silent. S1 asserts the
+   CEC catalogue row count against `CEC_ROWS_EXPECTED`.
 
 ## S5 placement decision — standalone, scheduled early
 
@@ -42,7 +49,8 @@ Fail (i) -> return to multi-peak framing. Fail (ii) -> redirect to string level
 (uses the Stage 3 array-capable simulator).
 
 ## Figures produced (regenerable, git-ignored)
-- `s1_coefficient_spread.png` — the C1 premise (coefficient distribution).
-- `s2_tempcoeff_error.png` — gamma_r faithful, beta_oc ~10% off (open finding).
-- `s3_multipeak.png` — stepped I-V and multi-peak P-V.
-- `s3_reverse_bias_sweep.png` — GMPP invariant across the swept avalanche range.
+- `s1_coefficient_spread.png` — the C1 premise, full catalogue (all technologies).
+- `s1_coefficient_spread_csi.png` — the in-scope c-Si distribution (the one C1 claims about).
+- `s2_tempcoeff_error.png` — gamma_r faithful, beta_oc deviation == |Adjust| (resolved, not open).
+- `s3_multipeak.png` — stepped I-V and multi-peak P-V (canonical module).
+- `s3_reverse_bias_sweep.png` — avalanche params cannot act in this regime (scoped claim, not "invariant generally").
