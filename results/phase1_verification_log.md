@@ -261,3 +261,36 @@ validation for C1's distribution and C3's learned model. The ~2-2.5% off-STC ban
 travels with every temperature-dependent claim downstream.
 
 Status: 18 tests pass. S4 green -> the S6-S8 block is unblocked (invariant met).
+
+## S5 - array generalisation (Stage 3, standalone) - PASS
+
+Generalises the S3 module-level composition one level up: a module is substrings
+in series (current-domain, sum voltages, bypass across each substring); a string
+is modules in series composed the SAME way, with a bypass diode across each
+module. The array-capable simulator is the same code applied recursively.
+
+Three checkpoints on the canonical module (Canadian_Solar_Inc__CS6U_310P):
+
+1. **N=1 reduction.** A string of one module reproduces module_iv exactly
+   (GMPP 310.128 W at 36.394 V, identical to 1e-6). The generalisation does not
+   change the base case.
+2. **Series scaling.** Three identical unshaded modules give 3x voltage
+   (36.39 -> 109.18 V) and 3x power (310.1 -> 930.4 W) at the same current
+   (8.52 A) - correct series composition.
+3. **String-level multi-peak.** Three modules at 1000/700/400 W/m^2 produce a
+   3-peak string curve (module Isc 9.08/6.36/3.63 A, ratios 1.00/0.70/0.40),
+   GMPP 461.9 W at 75.4 V. A shaded string is multi-peak by the same
+   module-level-bypass mechanism S3 demonstrated for substrings.
+
+Figure: results/figures/s5_string_multipeak.png (stepped I-V and multi-peak P-V
+at string scale).
+
+**Why this matters (insurance).** Gate A(ii) may find that a recalibrated
+constant already solves the module-level problem, in which case the study
+redirects to string level. S5 ensures that redirect costs 2-3 weeks, not two
+months, because the string simulator already exists and is verified. Kept a
+standalone checkpoint so it cannot be quietly dropped, but scheduled immediately
+after Stage 2 while the S3 composition code is fresh.
+
+Status: 21 tests pass. Phase 1 Stages 1-3 complete; Stage 4 (S6-S8 -> Gate A) is
+the remaining work.

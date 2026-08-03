@@ -85,6 +85,14 @@ class Bypass:
         i = self.I0 * (np.exp(np.clip(-v / vt, -50, 50)) - 1.0)
         return np.maximum(i, 0.0)
 
+    @property
+    def clamp_voltage(self) -> float:
+        """Approx forward drop (negative V) when the diode conducts a bypassed
+        module's current. Used at string level, where a shaded module carrying no
+        useful current is clamped to roughly this voltage by its bypass diode."""
+        vt = self.n * _K * (self.temp_c + 273.15) / _Q
+        return -float(vt * np.log(8.0 / self.I0))  # ~-0.6 V at ~8 A, 25 C
+
 
 # --------------------------------------------------------------------------
 # Substring scaling and I-V
@@ -301,3 +309,64 @@ def analyse(curve: dict, prominence_frac=0.01, min_separation_v=1.0):
         n_peaks=len(peaks),
         peaks=sorted(peaks, key=lambda t: -t[2]),
     )
+
+# --------------------------------------------------------------------------
+# Array generalisation (S5): modules in series -> a string
+# --------------------------------------------------------------------------
+def string_iv(mp: ModuleParams, module_irradiances, T,
+              n_substrings=config.N_SUBSTRINGS,
+              bd: Breakdown | None = None, bp: Bypass | None = None,
+              n_points=4000):
+    """Compose a string I-V from several modules in series.
+
+    A module is substrings-in-series composed in the current domain (module_iv).
+    A string is modules-in-series composed the SAME way, one level up: the string
+    carries one current; each module's voltage at that current is summed. This is
+    the array-capable generalisation (S5) — the substring-composition code S3
+    wrote, reused unchanged at the module level.
+
+    `module_irradiances` is a sequence of per-module irradiance patterns, each a
+    length-`n_substrings` sequence. `[[1000,1000,1000]]` is the single-module
+    N=1 special case and must reproduce `module_iv` exactly.
+
+    Returns a dict with arrays I, V, P and the per-module short-circuit currents.
+    """
+    bd = bd or Breakdown()
+    bp = bp or Bypass(temp_c=T)
+    patterns = [np.asarray(p, dtype=float) for p in module_irradiances]
+    assert all(len(p) == n_substrings for p in patterns), \
+        "each module needs one irradiance per substring"
+
+    # per-module V(I) curves and their short-circuit currents
+    curves, isc = [], []
+    for irr in patterns:
+        c = module_iv(mp, irr, T, n_substrings=n_substrings, bd=bd, bp=bp,
+                      n_points=n_points)
+        curves.append(c)
+        isc.append(float(c["isc_substrings"].max()))  # module Isc = brightest sub
+    isc = np.array(isc)
+
+    # common current grid up to the strongest module's Isc
+    I = np.linspace(0.0, isc.max(), n_points)
+
+    # Sum each module's voltage at the shared current (series composition), with a
+    # MODULE-LEVEL bypass diode across each module. In a real string, when a
+    # shaded module cannot carry the string current (I > its Isc), its bypass
+    # diode conducts and clamps that module to ~-0.6 V rather than forcing it deep
+    # into reverse bias. Without this, a dim module in series with a bright one is
+    # unrepresentable (its curve does not reach the string current) - which is
+    # exactly why real strings have module bypass diodes. This is the same
+    # bypass mechanism S3 applied to substrings, applied one level up.
+    V = np.zeros_like(I)
+    for c in curves:
+        i_asc = c["I"]                # module current 0..Isc (ascending)
+        v_of_i = c["V"]               # module voltage Voc..0 (descending)
+        i_mod_max = float(i_asc.max())
+        Vmod = np.interp(I, i_asc, v_of_i)   # clamps above Isc, fixed next line
+        # where string current exceeds this module's Isc, the module is bypassed
+        bypassed = I > i_mod_max
+        Vmod = np.where(bypassed, bp.clamp_voltage, Vmod)
+        V += Vmod
+
+    P = V * I
+    return dict(I=I, V=V, P=P, isc_modules=isc, n_modules=len(patterns))

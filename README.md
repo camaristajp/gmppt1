@@ -50,7 +50,7 @@ fallback margin 1 % of operating power.
 |---|---|---|---|
 | 1 | S1, S2 | environment + STC verification (STC operating point; temp coeffs documented) | PASS |
 | 2 | S3, S4 | shading physics + external validation | PASS (S4: single-diode validated vs Sandia measurement ~2%; Basoglu structural; multi-peak deferred to Phase 8) |
-| 3 | S5 | array generalisation (standalone, scheduled early) | not started |
+| 3 | S5 | array generalisation (standalone, scheduled early) | PASS (N=1 reduces to module; shaded string is multi-peak) |
 | 4 | S6–S8 | scenarios → labelling → characterisation → Gate A | not started (blocked on S4) |
 
 See WORKFLOW.md for stage done-criteria and invariants.

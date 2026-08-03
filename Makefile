@@ -9,8 +9,8 @@ stage1:                 # S1 + S2  (environment + STC verification)
 stage2:                 # S3 + S4 (shading physics + external validation)
 	python phase1/s3_reverse_bias_bypass.py
 	python phase1/s4_external_validation.py
-stage3:                 # S5  (array generalisation) -- not yet built
-	@echo "S5 not yet implemented"
+stage3:                 # S5  (array generalisation)
+	python phase1/s5_array_generalisation.py
 stage4:                 # S6 + S7 + S8 -> Gate A -- blocked until S4 green
 	@echo "S6-S8 blocked: S4 must be green first"
 figures:                # regenerate all figures
