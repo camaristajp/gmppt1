@@ -7,3 +7,5 @@ pvlib==0.15.2
 pyarrow==25.0.0
 matplotlib==3.11.1
 pytest==8.4.2
+streamlit
+plotly
