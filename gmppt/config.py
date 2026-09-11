@@ -68,6 +68,27 @@ DEG_DT = -0.0002677            # eV/K
 
 # Module architecture in scope (Section 8.1)
 N_SUBSTRINGS = 3               # conventional full-cell c-Si, three bypass diodes
+
+# Reverse-bias breakdown setting for scenario evaluation (S6/S8) and validation.
+# Physically, a cell driven into reverse bias under sub-substring shading DOES
+# break down (avalanche); modelling it as never breaking down is less realistic.
+# So the primary characterisation uses breakdown ON. Breakdown OFF is retained as
+# a reproducible documented bound (it gives a higher, more conservative-looking
+# region-error rate). L4 showed the rate is insensitive to the exact ON parameters.
+#   "on"  -> Breakdown(factor=1e-2, voltage=-15.0, exp=3.28)  [realistic, primary]
+#   "off" -> Breakdown(factor=0.0)                            [bound, was S8 default]
+BREAKDOWN_MODE = "on"          # "on" (primary) or "off" (documented bound)
+BREAKDOWN_ON_PARAMS = dict(factor=1e-2, voltage=-15.0, exp=3.28)
+
+
+def breakdown(mode=None):
+    """Return a device.Breakdown for the given mode ("on"/"off"), defaulting to
+    BREAKDOWN_MODE. Imported lazily to avoid a config<->device import cycle."""
+    from gmppt.device import Breakdown
+    mode = mode or BREAKDOWN_MODE
+    if mode == "on":
+        return Breakdown(**BREAKDOWN_ON_PARAMS)
+    return Breakdown()  # off: factor=0.0
 CSI_TECHNOLOGIES = ("Mono-c-Si", "Multi-c-Si")
 
 # --------------------------------------------------------------------------

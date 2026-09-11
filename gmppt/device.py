@@ -177,6 +177,88 @@ def substring_element_iv(sub, G, T, bd: Breakdown, bp: Bypass, n_v=4000):
     return v, i_elem
 
 
+def substring_element_iv_subshaded(sub, cell_group_irr, T, bd: Breakdown,
+                                   bp: Bypass, n_v=4000):
+    """Terminal I-V of a substring whose CELLS are non-uniformly shaded.
+
+    `cell_group_irr` is a sequence of irradiances (W/m^2), one per equal-sized
+    cell group WITHIN this one substring. All groups are in series; there is ONE
+    bypass diode across the whole substring, none per cell group.
+
+    This is the sub-substring geometry S3 could not represent and that Gate A(i)
+    tests. The physics that emerges here and nowhere else: when one cell group is
+    shaded far below its neighbours, the brighter groups drive the shaded group
+    into DEEP reverse bias (there is no bypass to protect it), and the reverse-
+    bias / avalanche parameters finally govern where the substring's steps fall.
+    The bypass across the whole substring still clamps the substring TERMINAL at
+    ~-0.6 V, but internally a single cell can sit at -10..-20 V.
+
+    Composition: each cell group is a fraction (1/n_groups) of the substring;
+    compose the groups in series in the current domain (sum voltages at shared
+    current), then place the substring bypass across the summed terminal.
+    """
+    irr = np.asarray(cell_group_irr, dtype=float)
+    n_groups = len(irr)
+    if n_groups == 1:
+        # uniform substring -> identical to the standard path
+        return substring_element_iv(sub, float(irr[0]), T, bd, bp, n_v=n_v)
+
+    # each cell group is 1/n_groups of this substring's series cells
+    group = dict(sub)
+    group["a_ref"] = sub["a_ref"] / n_groups
+    group["R_sh_ref"] = sub["R_sh_ref"] / n_groups
+    group["R_s"] = sub["R_s"] / n_groups
+
+    # per-group I-V WITHOUT bypass (no per-cell-group bypass diode); reverse bias
+    # via Bishop. Build each on its own voltage grid, then invert to V(I) on a
+    # shared current grid and sum.
+    curves, isc = [], []
+    for G in irr:
+        IL, I0, Rs, Rsh, nNsVth = substring_operating_params(group, G, T)
+        v_oc = float(pvsystem.singlediode(IL, I0, Rs, Rsh, nNsVth)["v_oc"])
+        v_floor = min(-2.0, 0.95 * bd.voltage) if bd.factor > 0 else -2.0
+        v = np.linspace(v_floor, v_oc * 1.02, n_v)
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", message="some failed to converge",
+                                    category=RuntimeWarning)
+            warnings.filterwarnings("ignore",
+                                    message="invalid value encountered in power",
+                                    category=RuntimeWarning)
+            i_grp = np.asarray(singlediode.bishop88_i_from_v(
+                v, IL, I0, Rs, Rsh, nNsVth,
+                breakdown_factor=bd.factor, breakdown_voltage=bd.voltage,
+                breakdown_exp=bd.exp))
+        curves.append((v, i_grp))
+        isc.append(float(np.interp(0.0, v, i_grp)))
+    isc = np.array(isc)
+
+    # shared current grid 0..i_max; sum group voltages at each current (series).
+    i_max = float(isc.max())
+    I = np.linspace(0.0, i_max, n_v)
+    Vsub = np.zeros_like(I)
+    for (v, i_grp) in curves:
+        i_asc = i_grp[::-1]
+        v_asc = v[::-1]
+        # a shaded group with low Isc cannot carry I>its own reverse-bias max;
+        # np.interp clamps to the deepest reverse-bias voltage, which is the
+        # physically correct "driven to its breakdown floor" behaviour here.
+        Vsub += np.interp(I, i_asc, v_asc)
+
+    # place the substring bypass across the summed terminal: where Vsub goes
+    # negative past the clamp, the bypass conducts and holds the terminal.
+    clamp = bp.clamp_voltage
+    Vsub = np.maximum(Vsub, clamp)
+
+    # return in the same (v ascending, i descending) convention as the standard
+    # path: here we have (I ascending, Vsub). Convert to v-ascending form.
+    order = np.argsort(Vsub)
+    v_out = Vsub[order]
+    i_out = I[order]
+    # deduplicate on v for a clean monotone curve
+    v_uni, idx = np.unique(v_out, return_index=True)
+    return v_uni, i_out[idx]
+
+
 # --------------------------------------------------------------------------
 # Module I-V
 # --------------------------------------------------------------------------
@@ -186,13 +268,17 @@ def module_iv(mp: ModuleParams, irradiances, T,
               n_points=4000):
     """Compose the module I-V from per-substring irradiances.
 
-    `irradiances` is a length-`n_substrings` sequence (W/m^2). Returns a dict
-    with arrays I, V, P and the per-substring short-circuit currents.
+    `irradiances` is a length-`n_substrings` sequence. Each entry is either:
+      * a scalar W/m^2  -> that substring is uniformly lit (the original path); or
+      * a sequence of W/m^2 -> that substring is SUB-SUBSTRING shaded, one value
+        per equal cell group within it (the Gate A(i) geometry).
+    Mixing is allowed: e.g. [1000, 1000, [1000, 1000, 200]] shades one cell group
+    of the third substring only. Returns a dict with arrays I, V, P and the
+    per-substring short-circuit currents.
     """
     bd = bd or Breakdown()
     bp = bp or Bypass(temp_c=T)
-    irr = np.asarray(irradiances, dtype=float)
-    assert len(irr) == n_substrings
+    assert len(irradiances) == n_substrings
 
     # split cells across substrings (handle non-divisible counts)
     base = mp.N_s // n_substrings
@@ -201,11 +287,17 @@ def module_iv(mp: ModuleParams, irradiances, T,
         counts[k] += 1
     fracs = [c / mp.N_s for c in counts]
 
-    # per-substring element I-V and short-circuit current
+    # per-substring element I-V and short-circuit current; route uniform vs
+    # sub-substring per entry
     elems, isc = [], []
-    for G, frac in zip(irr, fracs):
+    for entry, frac in zip(irradiances, fracs):
         sub = scale_to_substring(mp, frac)
-        v, i_elem = substring_element_iv(sub, G, T, bd, bp)
+        if np.isscalar(entry):
+            v, i_elem = substring_element_iv(sub, float(entry), T, bd, bp,
+                                             n_v=n_points)
+        else:
+            v, i_elem = substring_element_iv_subshaded(sub, entry, T, bd, bp,
+                                                       n_v=n_points)
         elems.append((v, i_elem))
         isc.append(float(np.interp(0.0, v, i_elem)))  # v ascending -> i at v=0
     isc = np.array(isc)
@@ -218,24 +310,24 @@ def module_iv(mp: ModuleParams, irradiances, T,
     # invert each substring's element I-V to V(I) and sum
     #
     # np.interp CLAMPS to the endpoint outside [i_asc.min, i_asc.max] rather
-    # than raising, so a substring forced beyond its grid would silently return
-    # the grid-edge voltage and corrupt the module curve with no error. The
-    # common current grid runs 0..isc.max, and every substring's element curve
-    # carries current from its own reverse-bias floor (I high) up through I=0 at
-    # v_oc; the requested range is representable as long as isc.max does not
-    # exceed any element's reverse-bias current at the grid floor. Assert it.
+    # than raising. For a uniform substring the element curve runs deep into
+    # reverse bias and covers the whole current range, so clamping never bites.
+    # For a SUB-SUBSTRING-shaded substring whose terminal is bypass-clamped, the
+    # curve stops near the bypass voltage and does NOT reach the brightest
+    # substring's Isc: physically, when the module current exceeds this
+    # substring's own Isc, its bypass diode conducts and holds the terminal at
+    # the clamp voltage. So for currents beyond a substring's range we substitute
+    # the bypass clamp rather than raising or silently clamping to a wrong value.
+    clamp = bp.clamp_voltage
     V = np.zeros_like(I)
     for (v, i_elem) in elems:
-        # i_elem strictly decreasing in v -> ascending when reversed
         i_asc = i_elem[::-1]
         v_asc = v[::-1]
-        if I.max() > i_asc.max() + 1e-6 or I.min() < i_asc.min() - 1e-6:
-            raise ValueError(
-                f"module current grid [{I.min():.3f}, {I.max():.3f}] A exceeds a "
-                f"substring's representable range [{i_asc.min():.3f}, "
-                f"{i_asc.max():.3f}] A; np.interp would clamp silently. Widen the "
-                f"substring voltage grid (see substring_element_iv v_floor).")
-        V += np.interp(I, i_asc, v_asc)
+        Vsub = np.interp(I, i_asc, v_asc)
+        over = I > i_asc.max() + 1e-9          # current beyond this substring's Isc
+        if over.any():
+            Vsub = np.where(over, clamp, Vsub)  # bypass conducts, terminal clamped
+        V += Vsub
 
     P = V * I
     return dict(I=I, V=V, P=P, isc_substrings=isc, cell_counts=counts)

@@ -1,0 +1,10 @@
+# Base theme = light so every native widget (inputs, selects, segmented nav,
+# sidebar) renders as a proper light control. Dark mode is applied on top via
+# CSS from the in-app theme toggle.
+[theme]
+base = "light"
+primaryColor = "#E8743B"            # coral accent (brand / active / primary action)
+backgroundColor = "#F8FAFC"         # page: very light cool gray
+secondaryBackgroundColor = "#FFFFFF" # sidebar / cards / inputs: white
+textColor = "#0F172A"               # dark navy/charcoal primary text
+font = "sans serif"
