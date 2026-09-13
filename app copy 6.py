@@ -924,17 +924,6 @@ def load_curve_bank():
     return json.loads(p.read_text()) if p.exists() else None
 
 
-def _logo_path():
-    lp = ASSETS / "ailab_logo.png"
-    return str(lp) if lp.exists() else None
-
-
-BRAND_NAVY = "#12306B"
-CREDIT_LINES = ["Artificial Intelligence Lab · Jeju National University",
-                "Julliane Pearl Camarista — Master\u2019s Student",
-                "Adviser: Prof. Yung-Cheol Byun"]
-
-
 @st.cache_data(show_spinner=False)
 def load_slim_dataset():
     p = ASSETS / "phase1_dataset.csv"
@@ -983,7 +972,7 @@ def init_state():
     st.session_state.setdefault("sweep_results", None)
     st.session_state.setdefault("dataset", None)
     st.session_state.setdefault("result", None)
-    st.session_state.setdefault("section", "🏠 Home")
+    st.session_state.setdefault("section", "🔆 Simulator")
     st.session_state.setdefault("sim_step", "Setup")
     st.session_state.setdefault("theme_choice", "🌞 Light")
     st.session_state.setdefault("base_val", 1000)
@@ -1023,14 +1012,14 @@ def compute_sub_irr(n_sub, base_G):
         return cur
     if obj.startswith("Full Sun"):
         return [float(base_G)] * n_sub
-    sev = st.session_state.get("shade_severity") or "Moderate"
+    sev = st.session_state.shade_severity
     reduction = (st.session_state.shade_custom_pct / 100.0) if sev == "Custom" \
-        else SEVERITY_REDUCTION.get(sev, 0.55)
+        else SEVERITY_REDUCTION[sev]
     if obj in ("Cloud", "Soiling"):
         zones = list(range(n_sub))
     else:
-        loc = st.session_state.get("shade_location") or "Center"
-        zones = zones_from_location(loc, n_sub, st.session_state.shade_custom_zones)
+        zones = zones_from_location(st.session_state.shade_location, n_sub,
+                                    st.session_state.shade_custom_zones)
     return object_to_sub_irr(obj, reduction, zones, base_G, n_sub)
 
 
@@ -1074,20 +1063,6 @@ def run_simulation():
                               st.session_state.get("scenario_name") or st.session_state.shade_label,
                               res))
     st.session_state.sim_step = "Results"
-
-
-def load_and_run(shade_object, severity, location, base_G, T):
-    """One-click: set a shading scenario, run the real model, jump to Results."""
-    st.session_state.shade_object = shade_object
-    st.session_state.shade_severity = severity
-    st.session_state.shade_location = location
-    st.session_state.base_val = float(base_G)
-    st.session_state.temp_c = float(T)
-    for k in ("base_val", "temp_c"):          # let the dual controls re-seed
-        st.session_state.pop(f"{k}_num", None)
-        st.session_state.pop(f"{k}_sel", None)
-    run_simulation()
-    st.session_state.section = "🔆 Simulator"
 
 
 # --------------------------------------------------------------------------- #
@@ -1203,7 +1178,6 @@ def welcome_dialog():
         st.session_state.show_tutorial = False
         st.session_state.tutorial_seen = True
         st.rerun()
-    st.caption("Artificial Intelligence Lab · Jeju National University")
 
 
 def render_setup():
@@ -1784,82 +1758,6 @@ def page_dataset_generator(ds, topo, base_G, T_c):
         st.caption("Browse individual scenarios under **🖼️ Gallery → Generated dataset**.")
 
 
-def render_home():
-    logo = _logo_path()
-    top = st.columns([1, 1.1, 1])
-    with top[1]:
-        if logo:
-            st.image(logo, use_container_width=True)
-    st.markdown(f"<h1 style='text-align:center;color:{BRAND_NAVY};margin:0.2rem 0 0'>"
-                f"PV Partial-Shading Simulator</h1>", unsafe_allow_html=True)
-    st.markdown("<p style='text-align:center;color:#475569;max-width:760px;"
-                "margin:0.4rem auto 0'>Interactive single-diode + bypass-diode simulation "
-                "of crystalline-silicon PV modules under partial shading — from module setup "
-                "and shading scenarios to I–V / P–V curves, GMPP, bypass behavior, power loss, "
-                "datasets and validation.</p>", unsafe_allow_html=True)
-    st.markdown("<div style='text-align:center;color:#0F172A;margin-top:1rem;"
-                "font-size:0.95rem'>" + "<br>".join(CREDIT_LINES) + "</div>",
-                unsafe_allow_html=True)
-    lc = st.columns([1, 1.4, 1.4, 1])
-    if lc[1].button("🚀 Launch Simulator", type="primary", use_container_width=True):
-        st.session_state.section = "🔆 Simulator"
-        st.session_state.sim_step = "Setup"
-        st.rerun()
-    if lc[2].button("⚡ Quick Demo", use_container_width=True,
-                    help="Load a partial-shading example and run it instantly"):
-        load_and_run("Pole", "Severe", "Center", 1000, 25)
-        st.rerun()
-    st.divider()
-    st.markdown(f"<div style='text-align:center;color:{BRAND_NAVY};font-weight:600;"
-                f"margin-bottom:0.6rem'>What you can do</div>", unsafe_allow_html=True)
-    cards = [("🔆 Simulator", "Setup → Scenario → Results", "🔆 Simulator"),
-             ("📈 Analysis", "I–V/P–V, substrings, peaks, sweeps", "📈 Analysis"),
-             ("🧪 Dataset", "Generate & export scenario sets", "🧪 Dataset"),
-             ("✅ Validation", "How the model was checked", "✅ Validation")]
-    fc = st.columns(4)
-    for i, (title, desc, dest) in enumerate(cards):
-        with fc[i]:
-            with st.container(border=True):
-                st.markdown(f"**{title}**")
-                st.caption(desc)
-                if st.button("Open", key=f"home_open_{i}", use_container_width=True):
-                    st.session_state.section = dest
-                    st.rerun()
-    st.markdown(f"<div style='text-align:center;color:{BRAND_NAVY};font-weight:600;"
-                f"margin:1rem 0 0.6rem'>Try an example</div>", unsafe_allow_html=True)
-    examples = [("☁️ Passing cloud", "Cloud", "Moderate", "All", 900, 25),
-                ("🏗️ Pole shadow (S3)", "Pole", "Severe", "Right", 1000, 25),
-                ("🌫️ Severe soiling", "Soiling", "Severe", "All", 800, 35)]
-    ec = st.columns(3)
-    for i, (label, obj, sev, loc, g, t) in enumerate(examples):
-        with ec[i]:
-            with st.container(border=True):
-                st.markdown(f"**{label}**")
-                st.caption(f"{g} W/m² · {t} °C · {sev.lower()}")
-                if st.button("Try →", key=f"ex_{i}", use_container_width=True):
-                    load_and_run(obj, sev, loc, g, t)
-                    st.rerun()
-
-    with st.expander("ℹ️ About this research"):
-        st.markdown(
-            "This tool simulates the **electrical behavior of crystalline-silicon PV "
-            "modules under partial shading** using a single-diode model with "
-            "per-substring bypass diodes. Given a module, array topology and a shading "
-            "scenario, it computes the I–V and P–V curves and identifies the global "
-            "maximum power point (GMPP), local peaks, bypass states and power loss.\n\n"
-            "**Objectives:** make partial-shading behavior easy to explore and explain, "
-            "provide reproducible scenario datasets for research, and offer a validated, "
-            "transparent model (see the **Validation** section).\n\n"
-            "It complements *PV-Seg Studio* (deep-learning segmentation of PV systems) "
-            "within the Artificial Intelligence Lab, Jeju National University.")
-        st.caption("Model scope: static partial shading; simplified single-diode + bypass "
-                   "(no moving shadows or MPPT dynamics yet).")
-
-    st.markdown("<div style='text-align:center;color:#94A3B8;font-size:0.8rem;"
-                "margin-top:1.2rem'>Artificial Intelligence Lab · Jeju National "
-                "University</div>", unsafe_allow_html=True)
-
-
 def main():
     st.set_page_config(page_title="PV Partial-Shading Simulator", layout="wide",
                        initial_sidebar_state="expanded")
@@ -1872,9 +1770,7 @@ def main():
     sec = render_topbar()
     if st.session_state.show_tutorial:
         welcome_dialog()
-    if "Home" in sec:
-        render_home()
-    elif "Simulator" in sec:
+    if "Simulator" in sec:
         render_simulator()
     elif "Analysis" in sec:
         _mini_sidebar("📈 Analysis"); render_analysis()
@@ -1886,27 +1782,21 @@ def main():
         _mini_sidebar("✅ Validation"); page_validation()
 
 
-NAV = ["🏠 Home", "🔆 Simulator", "📈 Analysis", "🧪 Dataset", "🗂️ Scenarios", "✅ Validation"]
+NAV = ["🔆 Simulator", "📈 Analysis", "🧪 Dataset", "🗂️ Scenarios", "✅ Validation"]
 
 
 def render_topbar():
-    c = st.columns([0.5, 1.9, 5.1, 1.3, 0.6], vertical_alignment="center")
-    logo = _logo_path()
-    if logo:
-        c[0].image(logo, width=44)
-    c[1].markdown(
-        f"<div style='line-height:1.05'><span style='font-weight:700;color:{BRAND_NAVY}'>"
-        f"PV Simulator</span><br><span style='font-size:0.70rem;color:#64748B'>"
-        f"AI Lab · JNU</span></div>", unsafe_allow_html=True)
-    with c[2]:
+    c = st.columns([2.2, 5.6, 1.4, 0.7], vertical_alignment="center")
+    c[0].markdown("### ☀️ PV Simulator")
+    with c[1]:
         sel = st.segmented_control("nav", NAV, default=st.session_state.section,
                                    label_visibility="collapsed")
         if sel:
             st.session_state.section = sel
-    with c[3]:
+    with c[2]:
         st.segmented_control("theme", ["🌞 Light", "🌙 Dark"], key="theme_choice",
                              label_visibility="collapsed")
-    with c[4]:
+    with c[3]:
         if st.button("❓", help="Open the getting-started guide",
                      use_container_width=True):
             st.session_state.show_tutorial = True
