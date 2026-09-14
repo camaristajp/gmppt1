@@ -3,7 +3,7 @@
 # CSS from the in-app theme toggle.
 [theme]
 base = "light"
-primaryColor = "#E8743B"            # coral accent (brand / active / primary action)
+primaryColor = "#12306B"            # AI Lab navy (brand / active / primary action)
 backgroundColor = "#F8FAFC"         # page: very light cool gray
 secondaryBackgroundColor = "#FFFFFF" # sidebar / cards / inputs: white
 textColor = "#0F172A"               # dark navy/charcoal primary text

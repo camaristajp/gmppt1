@@ -92,7 +92,7 @@ def apply_theme_css(name, th):
         """
     else:  # Light — native widgets are already light (config.toml base=light)
         css = common + f"""
-        .stApp, [data-testid="stAppViewContainer"] {{ background:linear-gradient(180deg,#F8FAFC 0%,#EEF5F1 100%); }}
+        .stApp, [data-testid="stAppViewContainer"] {{ background:{th['bg']}; }}
         [data-testid="stSidebar"] {{ background:{th['panel']}; border-right:1px solid {th['card_border']}; }}
         [data-testid="stSidebar"] p, [data-testid="stSidebar"] span,
         [data-testid="stSidebar"] h1, [data-testid="stSidebar"] h2,
@@ -1785,74 +1785,48 @@ def page_dataset_generator(ds, topo, base_G, T_c):
 
 
 def render_home():
-    import os
-    style = ("<style>"
-             ".pill{display:inline-block;background:#EAF0FB;color:%(navy)s;font-size:.72rem;"
-             "font-weight:700;letter-spacing:.04em;padding:6px 12px;border-radius:999px;}"
-             ".hero-h{font-size:2.5rem;line-height:1.12;font-weight:800;margin:.7rem 0 .5rem;"
-             "color:%(text)s;}"
-             ".grad{background:linear-gradient(90deg,#1D4ED8,#10B981);-webkit-background-clip:text;"
-             "background-clip:text;color:transparent;}"
-             ".hero-sub{color:%(muted)s;font-size:1.02rem;max-width:560px;line-height:1.5;}"
-             ".hero-note{color:%(muted)s;font-size:.82rem;margin-top:.5rem;}"
-             ".hero-cap{text-align:center;color:%(muted)s;font-size:.82rem;margin-top:.3rem;}"
-             ".sectlabel{text-align:center;letter-spacing:.16em;font-size:.78rem;font-weight:700;"
-             "color:%(muted)s;margin:1.4rem 0 .9rem;}"
-             ".feat{background:#FFFFFF;border:1px solid #E2E8F0;border-radius:16px;padding:18px 16px;"
-             "min-height:178px;box-shadow:0 1px 3px rgba(15,23,42,.05);}"
-             ".feat-ic{width:44px;height:44px;border-radius:50%%;display:flex;align-items:center;"
-             "justify-content:center;font-size:20px;margin-bottom:10px;}"
-             ".feat-t{font-weight:700;color:#0F172A;margin-bottom:4px;}"
-             ".feat-d{color:#64748B;font-size:.86rem;line-height:1.35;}"
-             "</style>") % {"navy": BRAND_NAVY, "text": TH["text"], "muted": TH["muted"]}
-    st.markdown(style, unsafe_allow_html=True)
-
-    L, R = st.columns([1.12, 1], vertical_alignment="center")
-    with L:
-        st.markdown("<span class='pill'>✨ ARTIFICIAL INTELLIGENCE LAB · JEJU NATIONAL "
-                    "UNIVERSITY</span>", unsafe_allow_html=True)
-        st.markdown("<div class='hero-h'>One model, <span class='grad'>every shading "
-                    "scenario</span> — interactive PV partial-shading simulation</div>",
-                    unsafe_allow_html=True)
-        st.markdown("<div class='hero-sub'>Using a single-diode model with per-substring "
-                    "bypass diodes, it computes I–V and P–V curves and reveals the GMPP, "
-                    "local peaks, bypass behavior and power loss under partial shading.</div>",
-                    unsafe_allow_html=True)
-        b1, b2, _ = st.columns([1, 1.2, 0.5])
-        if b1.button("Explore →", type="primary", use_container_width=True):
-            st.session_state.section = "🔆 Simulator"; st.session_state.sim_step = "Setup"; st.rerun()
-        if b2.button("⚡ Quick Demo", use_container_width=True,
-                     help="Load a partial-shading example and run it instantly"):
-            load_and_run("Pole", "Severe", "Center", 1000, 25); st.rerun()
-        st.markdown("<div class='hero-note'>No account or installation required.</div>",
-                    unsafe_allow_html=True)
-    with R:
-        hero = str(ASSETS / "hero.png")
-        if os.path.exists(hero):
-            st.image(hero, use_container_width=True)
-        elif _logo_path():
-            st.image(_logo_path(), width=220)
-        st.markdown("<div class='hero-cap'>From module shading → P–V curve, GMPP and power "
-                    "loss.</div>", unsafe_allow_html=True)
-
-    st.markdown("<div class='sectlabel'>THINGS YOU CAN DO HERE</div>", unsafe_allow_html=True)
-    feats = [("☀️", "#E8EEFB", "Simulate partial shading",
-              "Build a module and array, pick a shading object, and run the real model."),
-             ("📈", "#E6FBF5", "Read the P–V curve",
-              "See the global maximum power point, local peaks and power loss instantly."),
-             ("⇄", "#E9F7EF", "Compare scenarios",
-              "Save runs and overlay them to compare shading conditions."),
-             ("🧪", "#FEF3E2", "Generate datasets",
-              "Produce large, labeled scenario datasets for research."),
-             ("📄", "#FDECE4", "Validate & export",
-              "Inspect validation gates; export CSV, MATLAB and SVG.")]
-    fc = st.columns(5)
-    for i, (ic, bg, t, d) in enumerate(feats):
-        fc[i].markdown(f"<div class='feat'><div class='feat-ic' style='background:{bg}'>{ic}"
-                       f"</div><div class='feat-t'>{t}</div><div class='feat-d'>{d}</div></div>",
-                       unsafe_allow_html=True)
-
-    st.markdown("<div class='sectlabel'>TRY AN EXAMPLE</div>", unsafe_allow_html=True)
+    logo = _logo_path()
+    top = st.columns([1, 1.1, 1])
+    with top[1]:
+        if logo:
+            st.image(logo, use_container_width=True)
+    st.markdown(f"<h1 style='text-align:center;color:{BRAND_NAVY};margin:0.2rem 0 0'>"
+                f"PV Partial-Shading Simulator</h1>", unsafe_allow_html=True)
+    st.markdown("<p style='text-align:center;color:#475569;max-width:760px;"
+                "margin:0.4rem auto 0'>Interactive single-diode + bypass-diode simulation "
+                "of crystalline-silicon PV modules under partial shading — from module setup "
+                "and shading scenarios to I–V / P–V curves, GMPP, bypass behavior, power loss, "
+                "datasets and validation.</p>", unsafe_allow_html=True)
+    st.markdown("<div style='text-align:center;color:#0F172A;margin-top:1rem;"
+                "font-size:0.95rem'>" + "<br>".join(CREDIT_LINES) + "</div>",
+                unsafe_allow_html=True)
+    lc = st.columns([1, 1.4, 1.4, 1])
+    if lc[1].button("🚀 Launch Simulator", type="primary", use_container_width=True):
+        st.session_state.section = "🔆 Simulator"
+        st.session_state.sim_step = "Setup"
+        st.rerun()
+    if lc[2].button("⚡ Quick Demo", use_container_width=True,
+                    help="Load a partial-shading example and run it instantly"):
+        load_and_run("Pole", "Severe", "Center", 1000, 25)
+        st.rerun()
+    st.divider()
+    st.markdown(f"<div style='text-align:center;color:{BRAND_NAVY};font-weight:600;"
+                f"margin-bottom:0.6rem'>What you can do</div>", unsafe_allow_html=True)
+    cards = [("🔆 Simulator", "Setup → Scenario → Results", "🔆 Simulator"),
+             ("📈 Analysis", "I–V/P–V, substrings, peaks, sweeps", "📈 Analysis"),
+             ("🧪 Dataset", "Generate & export scenario sets", "🧪 Dataset"),
+             ("✅ Validation", "How the model was checked", "✅ Validation")]
+    fc = st.columns(4)
+    for i, (title, desc, dest) in enumerate(cards):
+        with fc[i]:
+            with st.container(border=True):
+                st.markdown(f"**{title}**")
+                st.caption(desc)
+                if st.button("Open", key=f"home_open_{i}", use_container_width=True):
+                    st.session_state.section = dest
+                    st.rerun()
+    st.markdown(f"<div style='text-align:center;color:{BRAND_NAVY};font-weight:600;"
+                f"margin:1rem 0 0.6rem'>Try an example</div>", unsafe_allow_html=True)
     examples = [("☁️ Passing cloud", "Cloud", "Moderate", "All", 900, 25),
                 ("🏗️ Pole shadow (S3)", "Pole", "Severe", "Right", 1000, 25),
                 ("🌫️ Severe soiling", "Soiling", "Severe", "All", 800, 35)]
@@ -1863,36 +1837,27 @@ def render_home():
                 st.markdown(f"**{label}**")
                 st.caption(f"{g} W/m² · {t} °C · {sev.lower()}")
                 if st.button("Try →", key=f"ex_{i}", use_container_width=True):
-                    load_and_run(obj, sev, loc, g, t); st.rerun()
-
-    st.write("")
-    with st.container(border=True):
-        st.markdown(f"<div style='text-align:center'><div style='font-size:1.5rem;"
-                    f"font-weight:800;color:{TH['text']}'>Are you ready?</div>"
-                    f"<div style='color:{TH['muted']};margin-top:.3rem'>Jump into the "
-                    f"simulator, or try the quick demo first.</div></div>",
-                    unsafe_allow_html=True)
-        cc = st.columns([2, 1, 2])
-        if cc[1].button("Explore →", type="primary", use_container_width=True, key="cta_explore"):
-            st.session_state.section = "🔆 Simulator"; st.session_state.sim_step = "Setup"; st.rerun()
+                    load_and_run(obj, sev, loc, g, t)
+                    st.rerun()
 
     with st.expander("ℹ️ About this research"):
         st.markdown(
-            "This tool simulates the **electrical behavior of crystalline-silicon PV modules "
-            "under partial shading** using a single-diode model with per-substring bypass "
-            "diodes. Given a module, array topology and a shading scenario it computes the "
-            "I–V/P–V curves and identifies the global maximum power point (GMPP), local peaks, "
-            "bypass states and power loss.\\n\\n**Objectives:** make partial-shading behavior "
-            "easy to explore and explain, provide reproducible scenario datasets for research, "
-            "and offer a validated, transparent model. It complements *PV-Scope* "
-            "(deep-learning PV segmentation) within the Artificial Intelligence Lab, JNU.")
+            "This tool simulates the **electrical behavior of crystalline-silicon PV "
+            "modules under partial shading** using a single-diode model with "
+            "per-substring bypass diodes. Given a module, array topology and a shading "
+            "scenario, it computes the I–V and P–V curves and identifies the global "
+            "maximum power point (GMPP), local peaks, bypass states and power loss.\n\n"
+            "**Objectives:** make partial-shading behavior easy to explore and explain, "
+            "provide reproducible scenario datasets for research, and offer a validated, "
+            "transparent model (see the **Validation** section).\n\n"
+            "It complements *PV-Seg Studio* (deep-learning segmentation of PV systems) "
+            "within the Artificial Intelligence Lab, Jeju National University.")
         st.caption("Model scope: static partial shading; simplified single-diode + bypass "
                    "(no moving shadows or MPPT dynamics yet).")
 
-    st.markdown("<div style='text-align:center;color:#94A3B8;font-size:0.8rem;margin-top:1.2rem'>"
-                "Interactive PV partial-shading simulation · single-diode + bypass model<br>"
-                "Artificial Intelligence Lab · Jeju National University</div>",
-                unsafe_allow_html=True)
+    st.markdown("<div style='text-align:center;color:#94A3B8;font-size:0.8rem;"
+                "margin-top:1.2rem'>Artificial Intelligence Lab · Jeju National "
+                "University</div>", unsafe_allow_html=True)
 
 
 def main():
