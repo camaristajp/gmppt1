@@ -7,6 +7,41 @@ PLACE THIS FILE AT:   C:\\Users\\user\\gmppt\\gmppt\\fallback.py
 SELF-TEST:
     python -m gmppt.fallback
 
+REVISION 4 -- the fallback rule is now a DENSE UNIFORM SCAN, not the three-point
+per-region rule. Revisions 1-3 (below) are unchanged and still describe the
+mechanism; only the fallback's internal search is replaced, for the reason in
+the next block.
+
+WHY REVISION 4 -- the crude fallback made the bound vacuous, and dense scanning fixes the RIGHT quantity
+
+    The validation run (p8_c4_fallback.py, n=778, c3_two_stage_full) came back
+    VACUOUS on whole_substring: the guarded model's own worst case was 1.03 W and
+    the unguarded model's 1.73 W -- excellent -- but the certified bound was
+    25.02 W, dragged there entirely by the three-point fallback rule's own tail.
+    The model barely needs insuring; the INSURANCE was the problem.
+
+    The three-point rule fails by REGION MIS-SELECTION: it probes one point per
+    region (0.80 through each), so it can rank the wrong region highest, and a
+    within-region refinement (bisection) cannot recover from that. Worst-case
+    certification needs the region chosen correctly, which needs SAMPLING DENSITY,
+    not a cleverer refinement.
+
+    The fallback fires on only ~0.3% of scenarios, so density is nearly free on
+    the mean: a FALLBACK_SCAN_PROBES-point uniform sweep costs about
+    0.003 * FALLBACK_SCAN_PROBES extra probes averaged over all calls, leaving the
+    mean near six and the trigger rate untouched. Its worst-case error is bounded
+    by the sweep resolution (~V_oc/FALLBACK_SCAN_PROBES), which near a peak is
+    small -- the property a bound needs. This is still a FIXED rule with no learned
+    component, so its worst case remains a property of the rule and the
+    distribution, exactly as the certification argument requires.
+
+    Expectation, declared: whole_substring should now certify (dense-scan worst
+    case well below the 1.73 W bar); sub_substring may still not, because there
+    the blocker was "no acceptable THRESHOLD" -- a trigger/confidence issue a
+    better fallback does not address.
+
+--- revisions 1-3, retained ---
+
 REVISION 3 -- four corrections, all made after the revision-2 quick check and
 before any reportable run.
 
@@ -154,7 +189,11 @@ N_SUB = int(config.N_SUBSTRINGS)
 
 # Probes: features + fallback candidates + landing. Asserted by test, not assumed.
 PROBES_CONFIDENT = len(PROBE_FRACTIONS) + 1
-PROBES_FALLBACK = len(PROBE_FRACTIONS) + N_SUB + 1
+# The fallback is a dense uniform scan (rev 4). Declared and swept-able: raise it
+# for a tighter worst-case bound, at ~0.003*value extra probes on the mean given
+# the ~0.3% trigger rate. Lower it only if the trigger rate is much higher.
+FALLBACK_SCAN_PROBES = 32
+PROBES_FALLBACK = len(PROBE_FRACTIONS) + FALLBACK_SCAN_PROBES + 1
 
 # Resolved where the signal varies. The quick check showed nothing firing below
 # 0.80 and everything above 0.90 catching the same single scenario, so the
@@ -176,6 +215,24 @@ RULE_ALONE = "fallback rule alone"
 def _key(t: float) -> str:
     """Threshold keys at three decimals: .2f collided 0.99 with 0.995 (D6)."""
     return f"guarded @ {t:.3f}"
+
+
+def _dense_scan(probe_fn: Callable[[float], float], v_oc: float,
+                n_scan: int = FALLBACK_SCAN_PROBES) -> float:
+    """The fallback rule (rev 4): a dense uniform sweep; land on the best point.
+
+    A FIXED, deterministic rule -- no learned component -- so its worst case over
+    the scenario distribution is a property of the rule, which is what the
+    certification argument requires. Worst-case error is bounded by the sweep
+    resolution (~v_oc / n_scan); near a peak the curve is flat, so the power error
+    that resolution implies is small. Unlike the retired three-point rule, a dense
+    sweep samples every region densely enough that region MIS-SELECTION -- the
+    cause of the old 25 W tail -- is bounded by the resolution rather than
+    unbounded.
+    """
+    vs = np.linspace(0.03 * v_oc, 0.97 * v_oc, int(n_scan))
+    ps = [probe_fn(float(v)) for v in vs]
+    return float(vs[int(np.argmax(ps))])
 
 
 @dataclass
@@ -235,14 +292,14 @@ class GuardedModel:
                 ctx.probe(v)
                 return v
 
-            # -- fallback: measure all three boundaries, take the best --------
+            # -- fallback: a DENSE UNIFORM SCAN, take the best (rev 4) ---------
+            # The prediction is discarded (low confidence); a dense sweep bounds
+            # the worst case by its resolution rather than risking region
+            # mis-selection as the old three-point rule did.
             self.n_fallback += 1
             self.log.append((str(ctx.geometry), True))
-            cands = [n * self.fallback_k * ctx.v_oc / N_SUB
-                     for n in range(1, N_SUB + 1)]
-            cands = [min(max(v, 0.0), ctx.v_oc) for v in cands]
-            best = max(cands, key=ctx.probe)
-            ctx.probe(best)
+            best = _dense_scan(ctx.probe, ctx.v_oc, FALLBACK_SCAN_PROBES)
+            ctx.probe(best)          # landing, counted
             return best
 
         fn.__name__ = f"seed_guarded_t{self.threshold:.3f}"
@@ -260,6 +317,19 @@ def three_candidate_method(k: float = 0.80) -> Callable[[Context], float]:
         cands = [n * k * ctx.v_oc / N_SUB for n in range(1, N_SUB + 1)]
         return max(cands, key=ctx.probe)
     fn.__name__ = f"three_candidate_{k:.2f}"
+    return fn
+
+
+def dense_scan_method(n_scan: int = FALLBACK_SCAN_PROBES) -> Callable[[Context], float]:
+    """The rev-4 fallback rule alone, as a method. Its worst case is the bound.
+
+    Same dense uniform sweep the GuardedModel fires on a trigger, run
+    unconditionally so its worst case over the distribution can be measured as the
+    certification reference (RULE_ALONE).
+    """
+    def fn(ctx: Context) -> float:
+        return _dense_scan(ctx.probe, ctx.v_oc, n_scan)
+    fn.__name__ = f"dense_scan_{int(n_scan)}"
     return fn
 
 
@@ -416,7 +486,7 @@ def sweep_thresholds(model: TwoStageModel, scenarios,
         per[g]["trigger_frac_pct"] = 0.0
     stash(NO_FALLBACK, per)
 
-    recs = run_method(three_candidate_method(0.80), scenarios)
+    recs = run_method(dense_scan_method(), scenarios)
     per = _score(recs, None, None, geometries)
     for g in per:
         per[g]["trigger_frac_pct"] = 100.0

@@ -1,12 +1,29 @@
 """
 p9_pso_comparison.py  --  PSO scored against the other trackers.
-REVISION 2 -- convergence measured, not assumed.
+REVISION 3 -- selectable module split (train/val); the validation run is
+             reportable. Rev 2's measured-convergence logic is unchanged.
 
 PLACE THIS FILE AT:   C:\\Users\\user\\gmppt\\phase2\\p9_pso_comparison.py
-                      OVERWRITE revision 1.
+                      OVERWRITE revision 2.
 
 RUN FROM THE REPO ROOT (C:\\Users\\user\\gmppt):
     python phase2\\p9_pso_comparison.py
+
+WHAT CHANGED IN REVISION 3
+    A --split argument selects the module set:
+
+        train  (default)  scenario_set(n) -- training modules, a design check,
+                          exactly as revisions 1-2 ran.
+        val               validation modules via scenarios_for_modules(split.val,
+                          n) -- the SAME mechanism p3 Part A and p7 rev 3 use.
+                          THIS run is the reportable convergence comparison; it
+                          is where the funded >= 50% convergence-time claim
+                          against PSO becomes citable.
+
+    Held-out (test) is NOT reachable here -- it is opened only through
+    p3_final_comparison.py, which ledgers and budgets each opening. Reference
+    numbers below (P&O 42.1% etc.) were training-module; validation differs in
+    the second digit, criteria unchanged.
 
 WHAT CHANGED IN REVISION 2
 
@@ -71,8 +88,10 @@ ACCEPTANCE -- DECLARED BEFORE THE RUN
         claim rests on all of them.
 
 SCOPE
-    Training-module scenarios: a design check, NOT a reportable comparison. All
-    figures simulated.
+    Default (--split train): training-module scenarios, a design check, NOT
+    reportable. With --split val the SAME comparison runs on validation modules
+    and IS reportable. Held-out is opened only via p3_final_comparison.py.
+    All figures simulated.
 """
 
 from __future__ import annotations
@@ -86,7 +105,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from gmppt import config  # noqa: E402
+from gmppt import config, dataset  # noqa: E402
 from gmppt.harness import scenario_set  # noqa: E402
 from gmppt.hybrid import make_hybrid, make_seed_only  # noqa: E402
 from gmppt.model import TwoStageModel  # noqa: E402
@@ -100,6 +119,26 @@ OUT = config.RESULTS_DIR / "phase2"
 
 MIN_ARRIVAL_MULTI_PCT = 90.0
 SPREAD_FACTOR = 2.0
+
+
+def scenarios_for_modules(modules: list[str], n_target: int,
+                          oversample: int = 6) -> list:
+    """Scenarios restricted to a given module set.
+
+    Copied verbatim from p3_final_comparison.py so the validation run here draws
+    from the SAME mechanism as the region/seed and tracker comparisons.
+    train_only=False so the held-back validation modules are reachable.
+    """
+    from gmppt import scenarios as scen
+    want = set(modules)
+    out = []
+    raw = scen.generate(dataset.pool(), n_target * oversample, train_only=False)
+    for sc in raw:
+        if str(sc.module) in want:
+            out.append(sc)
+            if len(out) >= n_target:
+                break
+    return out
 
 
 def _oracle(traj, temp_c=None, n_steps=N_STEPS, **_):
@@ -162,9 +201,13 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--n", type=int, default=200)
     ap.add_argument("--seeds", type=int, default=N_SEEDS)
+    ap.add_argument("--split", choices=("train", "val"), default="train",
+                    help="train = scenario_set (design check); val = validation "
+                         "modules (reportable). Held-out is reachable only via "
+                         "p3_final_comparison.py.")
     args = ap.parse_args()
 
-    print("P2.7d  PSO against the other trackers  (revision 2)")
+    print("P2.7d  PSO against the other trackers  (revision 3)")
     try:
         print("  " + config.provenance())
     except Exception:
@@ -191,8 +234,14 @@ def main() -> int:
         print("model 'c3_two_stage_full' not found.")
         return 1
 
-    scenarios = scenario_set(args.n)
-    print(f"{len(scenarios)} scenarios (training modules; design check)")
+    if args.split == "val":
+        split = dataset.module_split()
+        print(f"modules: {split.summary()}")
+        scenarios = scenarios_for_modules(split.val, args.n)
+        print(f"{len(scenarios)} scenarios on VALIDATION modules (REPORTABLE)")
+    else:
+        scenarios = scenario_set(args.n)
+        print(f"{len(scenarios)} scenarios (training modules; design check)")
     print(f"{args.seeds} seeds per PSO configuration\n")
 
     print("1. REFERENCE TRACKERS  (deterministic, one run each)")
@@ -345,14 +394,19 @@ def main() -> int:
     print("   period, which is outstanding.")
 
     payload = {"references": refs, "pso_sweep": sweep,
-               "n_scenarios": len(scenarios), "n_seeds": args.seeds,
+               "split": args.split, "n_scenarios": len(scenarios), "n_seeds": args.seeds,
                "criterion_1_pass": bool(c1),
                "arrival_separable_by_population": bool(real)}
     OUT.mkdir(parents=True, exist_ok=True)
-    (OUT / "pso_comparison.json").write_text(
+    out_name = f"pso_comparison_{args.split}.json"
+    (OUT / out_name).write_text(
         json.dumps(payload, indent=2, default=float), encoding="utf-8")
-    print(f"\nresults -> {OUT / 'pso_comparison.json'}")
-    print("\nAll figures simulated, on training modules.")
+    print(f"\nresults -> {OUT / out_name}")
+    if args.split == "val":
+        print("\nFigures on VALIDATION modules -- reportable. The >= 50%")
+        print("convergence-time claim vs PSO is citable from this run.")
+    else:
+        print("\nAll figures simulated, on training modules (design check).")
     return 0
 
 

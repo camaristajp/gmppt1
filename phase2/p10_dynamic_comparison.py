@@ -1,10 +1,10 @@
 """
 p10_dynamic_comparison.py  --  P2.8: the trackers under EN 50530 ramps.
-REVISION 3 -- scenario count raised from a debugging default to a declared
-              value; per-method sample spread now reported.
+REVISION 4 -- selectable module split (train/val); validation run is reportable.
+              Rev 3's declared scenario count and per-method spread are unchanged.
 
 PLACE THIS FILE AT:   C:\\Users\\user\\gmppt\\phase2\\p10_dynamic_comparison.py
-                      OVERWRITE revision 2.
+                      OVERWRITE revision 3.
 
 RUN FROM THE REPO ROOT (C:\\Users\\user\\gmppt):
     python phase2\\p10_dynamic_comparison.py
@@ -12,6 +12,22 @@ RUN FROM THE REPO ROOT (C:\\Users\\user\\gmppt):
     Roughly 60-90 minutes at the declared scenario count. Curves are cached per
     scenario and profile and shared across methods, so simulator cost is paid
     once rather than once per method.
+
+WHAT CHANGED IN REVISION 4
+    A --split argument selects the module set the comparison runs on:
+
+        train  (default)  scenario_set(POOL_SIZE) -- training modules, a design
+                          check, exactly as revision 3 ran.
+        val               validation modules via scenarios_for_modules(split.val,
+                          POOL_SIZE) -- the SAME mechanism p3 Part A, p7 rev 3 and
+                          p9 rev 3 use. THIS run is the reportable dynamic table;
+                          it is where the funded >= 99% EN 50530 efficiency figure
+                          becomes citable.
+
+    Held-out (test) is NOT reachable here -- it is opened only through
+    p3_final_comparison.py, which ledgers and budgets each opening. The pool is
+    still partitioned into uniform / shaded exactly as before; only the module
+    set the pool is drawn from changes.
 
 WHAT CHANGED IN REVISION 3 -- defect D21
 
@@ -122,9 +138,11 @@ ACCEPTANCE -- DECLARED BEFORE THE RUN
         written into the criterion.
 
 SCOPE
-    Training-module scenarios: a design check, NOT reportable. All figures
-    simulated. Divergences from the standard are declared in gmppt/dynamic.py
-    and travel with any figure.
+    Default (--split train): training-module scenarios, a design check, NOT
+    reportable. With --split val the SAME comparison runs on validation modules
+    and IS reportable. Held-out is opened only via p3_final_comparison.py. All
+    figures simulated. Divergences from the standard are declared in
+    gmppt/dynamic.py and travel with any figure.
 """
 
 from __future__ import annotations
@@ -138,7 +156,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from gmppt import config  # noqa: E402
+from gmppt import config, dataset  # noqa: E402
 from gmppt.dynamic import (CONTROL_PERIOD_S, SEQUENCES,  # noqa: E402
                            TIME_COMPRESSION, DynamicTrajectory,
                            aggregate_efficiency, dynamic_trajectory_for,
@@ -171,6 +189,27 @@ MIN_SLOPE_SENSITIVITY_PT = 0.2  # criterion (4)
 # difficulty rather than probe overhead. Criterion (4) is decided on these only.
 BLOCK_COST_INDEPENDENT = ("oracle [not buildable]", "P&O", "InC",
                           "seed only, no reseed", "hybrid, no reseed")
+
+
+def scenarios_for_modules(modules: list[str], n_target: int,
+                          oversample: int = 6) -> list:
+    """Scenarios restricted to a given module set.
+
+    Copied verbatim from p3_final_comparison.py so the validation run here draws
+    from the SAME mechanism as the region/seed and static/PSO tracker
+    comparisons. train_only=False so the held-back validation modules are
+    reachable.
+    """
+    from gmppt import scenarios as scen
+    want = set(modules)
+    out = []
+    raw = scen.generate(dataset.pool(), n_target * oversample, train_only=False)
+    for sc in raw:
+        if str(sc.module) in want:
+            out.append(sc)
+            if len(out) >= n_target:
+                break
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -425,9 +464,13 @@ def main() -> int:
                     choices=list(SEQUENCES.keys()))
     ap.add_argument("--cycles", type=int, default=1,
                     help="repetitions per slope; the standard runs up to 10")
+    ap.add_argument("--split", choices=("train", "val"), default="train",
+                    help="train = scenario_set (design check); val = validation "
+                         "modules (reportable). Held-out is reachable only via "
+                         "p3_final_comparison.py.")
     args = ap.parse_args()
 
-    print("P2.8  dynamic tracker comparison, EN 50530 ramps  (revision 3)")
+    print("P2.8  dynamic tracker comparison, EN 50530 ramps  (revision 4)")
     try:
         print("  " + config.provenance())
     except Exception:
@@ -472,11 +515,18 @@ def main() -> int:
         print("model 'c3_two_stage_full' not found.")
         return 1
 
-    pool = scenario_set(POOL_SIZE)
+    if args.split == "val":
+        split = dataset.module_split()
+        print(f"modules: {split.summary()}")
+        pool = scenarios_for_modules(split.val, POOL_SIZE)
+        src_label = "validation modules; REPORTABLE"
+    else:
+        pool = scenario_set(POOL_SIZE)
+        src_label = "training modules; design check"
     uniform = [s for s in pool if s.geometry == "uniform"][:args.n]
     shaded = [s for s in pool if s.geometry != "uniform"][:args.n]
     print(f"pool of {len(pool)} scenarios -> {len(uniform)} uniform, "
-          f"{len(shaded)} shaded (training modules; design check)")
+          f"{len(shaded)} shaded ({src_label})")
     if len(uniform) < args.n or len(shaded) < args.n:
         print(f"   NOTE: the pool did not yield {args.n} of each geometry.")
         print(f"   Raise POOL_SIZE (currently {POOL_SIZE}) if the counts above")
@@ -642,6 +692,7 @@ def main() -> int:
         print("   converter losses real hardware carries.")
 
     payload = {"sequence": args.sequence, "cycles": args.cycles,
+               "split": args.split,
                "control_period_s": CONTROL_PERIOD_S,
                "time_compression": TIME_COMPRESSION.get(args.sequence, 1.0),
                "n_declared": args.n, "pool_size": POOL_SIZE,
@@ -655,10 +706,14 @@ def main() -> int:
                "reseed_credited": bool(c3),
                "slope_sensitive": bool(c4)}
     OUT.mkdir(parents=True, exist_ok=True)
-    (OUT / f"dynamic_comparison_{args.sequence}.json").write_text(
+    out_name = f"dynamic_comparison_{args.sequence}_{args.split}.json"
+    (OUT / out_name).write_text(
         json.dumps(payload, indent=2, default=float), encoding="utf-8")
-    print(f"\nresults -> {OUT / f'dynamic_comparison_{args.sequence}.json'}")
-    print("\nAll figures simulated, on training modules. Divergences from")
+    print(f"\nresults -> {OUT / out_name}")
+    if args.split == "val":
+        print("\nFigures on VALIDATION modules -- reportable. Divergences from")
+    else:
+        print("\nAll figures simulated, on training modules. Divergences from")
     print("EN 50530 are declared in gmppt/dynamic.py and travel with any")
     print("figure taken from here.")
     return 0

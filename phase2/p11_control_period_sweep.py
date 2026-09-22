@@ -1,9 +1,10 @@
 """
 p11_control_period_sweep.py  --  P2.8b: at what control rate does the target break?
-REVISION 5 -- block count is now PER SEQUENCE, because convergence is.
+REVISION 6 -- 10-50 block count corrected to 6; rev 5's "sequence-dependent
+              convergence" finding was a TIME_COMPRESSION artefact (D20).
 
 PLACE THIS FILE AT:   C:\\Users\\user\\gmppt\\phase2\\p11_control_period_sweep.py
-                      OVERWRITE revision 4. gmppt/dynamic.py is NOT modified.
+                      OVERWRITE revision 5. gmppt/dynamic.py is NOT modified.
 
 RUN FROM THE REPO ROOT (C:\\Users\\user\\gmppt):
     python phase2\\p11_control_period_sweep.py --sequence 30-100
@@ -25,32 +26,50 @@ WHY THIS RUN EXISTS
     outstanding. It is therefore the one parameter that can be swept to find
     where the problem becomes hard.
 
-WHAT REVISION 5 CHANGES, AND THE FINDING BEHIND IT
+WHAT REVISION 6 CHANGES, AND WHY REVISION 5'S FINDING WAS WRONG
 
-    Revision 4 ran Sequence 30-100 successfully: check 0 measured 0.001 pt
-    between 6 and 12 blocks per phase, well inside the declared 0.1 pt, so the
-    block discretisation was converged and P2.8's headline figure carries no
-    discretisation error.
+    Revision 6 changes ONE executable value: BLOCKS_PER_PHASE["10-50"] goes from
+    24 back to 6. Everything else is text reconciled to the corrected finding.
 
-    Run on Sequence 10-50 with the same block count, CHECK 0 FAILED: 0.330 pt
-    between 6 and 12 blocks, more than three times the tolerance. The run stopped
-    before producing any figure.
+    THE CORRECTION. Revision 5 concluded "block convergence is sequence-
+    dependent" from a single measurement: Sequence 10-50 failed check 0 at 6
+    blocks by 0.330 pt, where 30-100 converged at 6 (0.001 pt). It read that as
+    curve shape -- low-irradiance curves being steeply nonlinear -- and raised
+    10-50 to 24.
 
-    THE FINDING: BLOCK CONVERGENCE IS SEQUENCE-DEPENDENT.
+    That 0.330 pt was measured with TIME_COMPRESSION["10-50"] = 10.0 STILL
+    ACTIVE. Revision 5 predates the D20 fix. The compression made 10-50's ramps
+    10x steeper than the standard specifies, and the gaps WIDENED with more
+    blocks (0.330 at 6, 2.051 at 24) -- which is divergence, not coarseness, since
+    a coarse discretisation converges as it is refined.
 
-    Sequence 30-100 spans 300 to 1000 W/m2. Sequence 10-50 spans 100 to 500, and
-    Sequence 1-10 spans 11 to 100. At low irradiance a panel's power curve is
-    steeply nonlinear: the peak voltage shifts more per unit of irradiance change
-    and the curve shape distorts. Six blocks approximate that badly. Higher up,
-    where the curves are closer to linear in irradiance, six suffice.
+    With compression removed (dynamic.py TIME_COMPRESSION all 1.0),
+    diag_block_convergence.py --sequence 10-50 measured the ladder directly:
 
-    So a block count validated on one sequence CANNOT be carried to another, and
-    P2.8's 99.911% is validated for Sequence 30-100 ONLY.
+        6 blocks   99.819%
+        12 blocks  99.821%   gap 0.002 pt   -> CONVERGED AT 6
 
-    Revision 5 makes the block count a PER-SEQUENCE declared value and forces
-    check 0 to run at whatever value the chosen sequence declares. That removes
-    the possibility of inheriting a count someone validated elsewhere -- which is
-    what revision 4 did by accident.
+    10-50 converges at 6 exactly as 30-100 does. Rev 5's 24 was a compression-era
+    artefact, and by rev 5's OWN rev-3 history a higher count is actively harmful
+    here: it makes degeneracy arrive earlier and shrinks the valid range of the
+    period sweep for no accuracy gain. Hence 10-50 -> 6.
+
+    WHAT SURVIVES THE CORRECTION. The MECHANISM rev 5 introduced -- a per-
+    sequence declared block count, with check 0 forced to run at the chosen
+    sequence's own count and never inherited across sequences -- is retained and
+    is exactly what caught this. The general claim "convergence is sequence-
+    dependent" is neither proven nor disproven in general; only the 10-50
+    evidence for it is withdrawn. Sequence 1-10 (dimmer still, 11-100 W/m2) had
+    20x compression and its 24 was set by UNTESTED analogy to 10-50 -- an analogy
+    now discredited. Its count is left at 24 as a conservative untested
+    placeholder; run diag_block_convergence.py --sequence 1-10 to set it from
+    measurement before scoring Sequence C, exactly as was done for 10-50. A high
+    placeholder cannot produce a false "converged" -- check 0 would catch it --
+    it only narrows the sweep's valid range, which does not matter until 1-10 is
+    run.
+
+    P2.8's 99.911% headline remains validated for Sequence 30-100, which was
+    always at compression 1.0 and converged at 6.
 
 THE HISTORY OF THIS FILE, RECORDED RATHER THAN TIDIED AWAY
 
@@ -163,28 +182,32 @@ TARGET_PCT = 99.0
 MIN_STEPS_PER_BLOCK = 2
 
 # ---------------------------------------------------------------------------
-# BLOCK COUNT PER SEQUENCE -- because convergence is sequence-dependent.
+# BLOCK COUNT PER SEQUENCE. The mechanism (per-sequence, never inherited, gated
+# by check 0) is retained from rev 5; the 10-50 VALUE is corrected in rev 6.
 #
 # 30-100  spans 300-1000 W/m2. Measured converged at 6: 0.001 pt against 12, and
-#         0.002 pt between 12 and 24 in revision 3. Curves are close to linear in
-#         irradiance up there, so coarse blocks approximate them well.
+#         0.002 pt between 12 and 24 in revision 3. Always at compression 1.0.
 #
-# 10-50   spans 100-500 W/m2. FAILED at 6: 0.330 pt against 12, more than three
-#         times the tolerance. Low-irradiance curves are steeply nonlinear -- the
-#         peak voltage shifts more per unit irradiance and the shape distorts --
-#         so finer blocks are required. Declared at 24; check 0 must pass at
-#         24 vs 48 before anything from this sequence is read.
+# 10-50   spans 100-500 W/m2. CONVERGED AT 6 once D20's time compression was
+#         removed: diag_block_convergence.py measured 99.819% at 6 vs 99.821% at
+#         12, a 0.002 pt gap. Rev 5's earlier 0.330 pt failure was the 10x-
+#         steepened ramp, not curve shape (gaps widened with refinement, the
+#         signature of divergence). Rev 5's 24 is withdrawn: a higher count only
+#         brings degeneracy earlier and narrows the valid sweep range.
 #
-# 1-10    spans 11-100 W/m2, an order of magnitude dimmer still. Declared at 24
-#         as a starting point on the same reasoning, and UNTESTED. Check 0
-#         decides it.
+# 1-10    spans 11-100 W/m2, dimmer still, and had 20x compression. Its 24 was an
+#         UNTESTED analogy to 10-50 -- now discredited. Left at 24 as a
+#         conservative untested placeholder; run diag_block_convergence.py
+#         --sequence 1-10 to set it from measurement before scoring Sequence C.
+#         A high placeholder cannot fake convergence (check 0 catches it); it
+#         only narrows the valid range, which is moot until 1-10 is run.
 #
-# A count validated on one sequence must never be carried to another. Revision 4
-# did that by accident and check 0 caught it.
+# A count validated on one sequence must never be carried to another -- the rule
+# that caught both the rev-4 inheritance and rev 5's compression artefact.
 # ---------------------------------------------------------------------------
 BLOCKS_PER_PHASE = {
     "30-100": 6,
-    "10-50": 24,
+    "10-50": 6,
     "1-10": 24,
 }
 
@@ -326,9 +349,11 @@ def check_block_convergence(scenarios, sequence: str, model: TwoStageModel,
     every configuration is well-formed.
 
     Measured to date: Sequence 30-100 converged at 6 (0.001 pt vs 12, 0.002 pt
-    between 12 and 24). Sequence 10-50 FAILED at 6 (0.330 pt vs 12), because its
-    low-irradiance end is steeply nonlinear. Convergence is therefore
-    sequence-dependent and a count must never be inherited across sequences.
+    between 12 and 24). Sequence 10-50 also converges at 6 once D20's time
+    compression is removed (0.002 pt vs 12, per diag_block_convergence.py); its
+    earlier 0.330 pt failure was the 10x-steepened ramp, not curve shape. A count
+    must still never be inherited across sequences -- that rule caught both the
+    rev-4 inheritance and rev 5's compression artefact.
     """
     effs = {}
     for n in (bpp, 2 * bpp):
@@ -370,7 +395,8 @@ def main() -> int:
     bpp = BLOCKS_PER_PHASE[args.sequence]
 
     print("P2.8b  control-period sweep: where does the funded target break?")
-    print("       (revision 5 -- block count per sequence)")
+    print("       (revision 6 -- 10-50 corrected to 6; rev 5's per-sequence")
+    print("        finding was a D20 compression artefact)")
     try:
         print("  " + config.provenance())
     except Exception:
@@ -394,10 +420,11 @@ def main() -> int:
     print(f"every block holds at least {MIN_STEPS_PER_BLOCK} control steps AND")
     print("its step counts differ from the previous period. Excluded rows are")
     print("still run and still printed.")
-    print(f"\nBLOCK COUNT IS PER SEQUENCE. Convergence is sequence-dependent:")
-    print("30-100 converged at 6 (0.001 pt); 10-50 FAILED at 6 (0.330 pt),")
-    print("because its low-irradiance end is steeply nonlinear. A count")
-    print("validated on one sequence must never be carried to another.")
+    print(f"\nBLOCK COUNT IS PER SEQUENCE, gated by check 0 and never inherited.")
+    print("30-100 converged at 6 (0.001 pt); 10-50 also converges at 6 once D20's")
+    print("compression is removed (0.002 pt, per diag_block_convergence.py) -- its")
+    print("earlier 0.330 pt was the 10x-steepened ramp, not curve shape. 1-10 is")
+    print("an untested placeholder at 24 pending its own diagnostic run.")
     print(f"This run uses {bpp} blocks/phase for sequence {args.sequence}.")
     print("\nPSO and the re-seeding hybrid are EXCLUDED throughout (defect D18).\n")
 

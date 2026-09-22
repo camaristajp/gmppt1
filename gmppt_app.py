@@ -1,0 +1,3487 @@
+"""
+gmppt_app.py — new entry point for the GMPPT Bench dashboard.
+
+Wraps your existing app.py (kept unchanged, imported as `sim`) in the new
+four-section navigation and the gmppt_ui design system.
+
+    Run:  streamlit run gmppt_app.py
+    Needs: streamlit >= 1.40, plotly, numpy, pandas — plus app.py and gmppt_ui.py
+           in the same folder.
+
+Sections (see DESIGN.md §2):
+    Home
+    Explore     The panels · Inside a panel · Whole system
+    Simulator   Set up a panel · Saved scenarios · Make a dataset   <- your existing app
+    Testing     Watch one run · Compare methods · Dynamic irradiance
+    The data    The dataset · Where it comes from
+
+Only genuinely unimplemented features are labelled as planned/not built. Implemented
+pages are navigable and must not be presented as "coming".
+"""
+from __future__ import annotations
+
+import numpy as np
+import pandas as pd
+import plotly.graph_objects as go
+import streamlit as st
+
+import app as sim          # your existing simulator — physics, presets, pages
+import gmppt_ui as ui
+from gmppt import config as _gcfg, dataset as _ds, device as _eng, scenarios as _scen
+from gmppt.hybrid import SEED_PROBE_COST
+
+st.set_page_config(page_title="GMPPT Bench", layout="wide", initial_sidebar_state="collapsed")
+sim.init_state()
+st.session_state.setdefault("gm_theme", "Light")
+
+# Theme: the existing figures read sim.TH, so keep it in step with the new tokens.
+ui.setup(st.session_state.gm_theme)
+sim.TH = sim.THEMES["Dark" if st.session_state.gm_theme == "Dark" else "Light"]
+sim.GRID = sim.TH["grid"]
+
+P: dict[str, st.Page] = {}   # filled below; page functions look pages up here at run time
+_e = ui._e                   # HTML-escape, so export strings cannot break the markup
+
+
+def go_to(key: str) -> None:
+    """Replaces the old `st.session_state.section = ...; st.rerun()` pattern."""
+    st.switch_page(P[key])
+
+
+# --------------------------------------------------------------------------- #
+# Home  (landing — matches the design mockup exactly)
+# --------------------------------------------------------------------------- #
+# Illustration and card icons extracted verbatim from the design mockup
+# (minified to a single line so Streamlit Markdown renders them as HTML, not code).
+_HERO_SVG = r'''<svg viewBox="0 0 620 360" style="width:100%;height:auto;display:block;" role="img" aria-label="The same panel side by side: unshaded with one smooth power peak, and shaded with three peaks of which only one is the true maximum"><rect x="6" y="6" width="298" height="348" rx="10" fill="#F7F6F1"></rect><rect x="316" y="6" width="298" height="348" rx="10" fill="#FBF4EC"></rect><text x="22" y="30" font-family="IBM Plex Mono, monospace" font-size="12" fill="#16616B">UNSHADED</text><text x="332" y="30" font-family="IBM Plex Mono, monospace" font-size="12" fill="#9A5314">SHADOW ACROSS THE STRIPS</text><rect x="70" y="44" width="170" height="84" fill="#DCE8E8" stroke="#A8C0C1"></rect><line x1="127" y1="44" x2="127" y2="128" stroke="#A8C0C1"></line><line x1="184" y1="44" x2="184" y2="128" stroke="#A8C0C1"></line><rect x="380" y="44" width="170" height="84" fill="#DCE8E8" stroke="#A8C0C1"></rect><line x1="437" y1="44" x2="437" y2="128" stroke="#A8C0C1"></line><line x1="494" y1="44" x2="494" y2="128" stroke="#A8C0C1"></line><rect x="380" y="102" width="170" height="26" fill="#B5641A" opacity="0.5"></rect><line x1="20" y1="298" x2="292" y2="298" stroke="#D6D2C7"></line><line x1="330" y1="298" x2="602" y2="298" stroke="#D6D2C7"></line><polyline points="20,298 50,272 80,246 110,222 140,200 165,186 185,180 205,181 225,192 245,214 265,250 285,298" fill="none" stroke="#16616B" stroke-width="2.5" stroke-linejoin="round"></polyline><circle cx="192" cy="180" r="6" fill="#B5641A"></circle><polyline points="330,298 349,273 369,250 388,234 403,228 415,235 425,249 437,231 452,207 466,189 478,182 491,186 503,200 515,218 527,210 539,202 553,196 563,206 576,233 588,266 600,298" fill="none" stroke="#16616B" stroke-width="2.5" stroke-linejoin="round"></polyline><circle cx="478" cy="182" r="6" fill="#B5641A"></circle><circle cx="403" cy="228" r="4" fill="none" stroke="#8A9098" stroke-width="1.5"></circle><circle cx="553" cy="196" r="4" fill="none" stroke="#8A9098" stroke-width="1.5"></circle><text x="22" y="322" font-family="IBM Plex Sans, sans-serif" font-size="13" fill="#2B3238">One peak. Any tracker finds it.</text><text x="332" y="322" font-family="IBM Plex Sans, sans-serif" font-size="13" fill="#2B3238">Three peaks. Only one is the real maximum.</text><text x="22" y="342" font-family="IBM Plex Mono, monospace" font-size="11" fill="#6A7177">power against voltage</text><text x="332" y="342" font-family="IBM Plex Mono, monospace" font-size="11" fill="#6A7177">the other two are traps</text><line x1="310" y1="6" x2="310" y2="354" stroke="#FFFFFF" stroke-width="3"></line></svg>'''
+_CARD_ICONS = [r'''<svg width="17" height="17" viewBox="0 0 18 18" aria-hidden="true"><rect x="2" y="2" width="14" height="14" rx="1.5" fill="none" stroke="#16616B" stroke-width="1.4"></rect><path d="M6.7 2v14M11.3 2v14" stroke="#16616B" stroke-width="1.4"></path></svg>''', r'''<svg width="17" height="17" viewBox="0 0 18 18" aria-hidden="true"><rect x="2" y="2" width="14" height="14" rx="1.5" fill="none" stroke="#16616B" stroke-width="1.4"></rect><path d="M2 11l7-7M5 15l10-10M10 16l6-6" stroke="#B5641A" stroke-width="1.3"></path></svg>''', r'''<svg width="17" height="17" viewBox="0 0 18 18" aria-hidden="true"><path d="M2 15c3 0 3-9 6.5-9S12 13 16 3" fill="none" stroke="#16616B" stroke-width="1.5" stroke-linecap="round"></path></svg>''', r'''<svg width="17" height="17" viewBox="0 0 18 18" aria-hidden="true"><path d="M4 3l8 6-8 6z" fill="none" stroke="#16616B" stroke-width="1.4" stroke-linejoin="round"></path></svg>''', r'''<svg width="17" height="17" viewBox="0 0 18 18" aria-hidden="true"><path d="M3 15V9M8 15V4M13 15v-4" stroke="#16616B" stroke-width="1.6" stroke-linecap="round"></path></svg>''']
+_CARD_TEXT = [
+    ("Build a scenario",
+     "Pick a validation module, choose a shading object and which panels it covers, "
+     "and set the sunlight and cell temperature."),
+    ("Read the curve",
+     "The power and current curves for that scenario, with every local peak and the "
+     "true maximum marked, and each bypass diode's state as you move the "
+     "operating point."),
+    ("Run the trackers",
+     "Send your scenario to the classic algorithms and to the model, and watch each "
+     "one search the same curve step by step."),
+    ("Compare methods",
+     "Every method on the same validation scenarios: arrival rate, worst case, "
+     "steps, and what the accuracy costs in readings."),
+    ("Results vs targets",
+     "The funded targets beside what was measured, with the caveats that belong to "
+     "each number."),
+]
+# The page each card opens, in the order of _CARD_TEXT — the real journey:
+# build a scenario, look inside it, run the trackers, compare, read the verdict.
+_CARD_LINKS = ["panels", "inside", "run", "compare", "results"]
+
+_SANDBOX_CARD_ICONS = [_CARD_ICONS[0]]
+_SANDBOX_CARD_TEXT = [
+    ("Sandbox — set up a panel",
+     "Type a datasheet in yourself and watch the curve. A separate, simplified "
+     "engine: exploratory only, never a benchmark result."),
+]
+_SANDBOX_CARD_LINKS = ["sim_setup"]
+
+
+def _home_cards(texts, icons, links, key):
+    """Cards whose action is an st.page_link, not an <a href>.
+
+    A raw href is a full browser navigation: it starts a new Streamlit session
+    and takes the scenario, the saved list, the dataset and the day events with
+    it. Every internal link in this app therefore goes through page_link or
+    switch_page. (R1)
+    """
+    c = ui.T()
+    with st.container(key=key):
+        cols = st.columns(max(len(texts), 3), gap="small")
+        for i, ((title, desc), icon, target) in enumerate(zip(texts, icons, links)):
+            with cols[i]:
+                with st.container(key=f"{key}-card-{i}"):
+                    st.markdown(
+                        f'<div class="gm-cardtop">'
+                        f'<span class="gm-ico">{icon}</span>'
+                        f'<div class="gm-title">{title}</div>'
+                        f'<p class="gm-desc">{desc}</p></div>', unsafe_allow_html=True)
+                    with st.container(key=f"{key}-go-{i}"):
+                        st.page_link(P[target], label="Open →")
+    return c
+
+
+def _session_io():
+    """Download / restore everything the user has built in this session."""
+    import json
+    with st.expander("Save or restore your session", expanded=False):
+        st.caption("Scenarios, saved curves and day events live in this browser "
+                   "session only. Download them to carry them to another machine.")
+        a, b = st.columns(2)
+        with a:
+            st.download_button("Download session (JSON)", _session_blob(),
+                               "gmppt_session.json", "application/json",
+                               use_container_width=True, key="session_dl")
+        with b:
+            up = st.file_uploader("Load session (JSON)", type=["json"],
+                                  key="session_up", label_visibility="collapsed")
+            if up is not None and st.button("Restore this session", key="session_restore",
+                                            use_container_width=True):
+                try:
+                    blob = json.loads(up.getvalue().decode("utf-8"))
+                except Exception as e:
+                    st.error(f"Not a session file: {e}")
+                else:
+                    for k in ("scenario_draft", "scenario_sent", "frozen", "day_events"):
+                        if k in blob:
+                            st.session_state[k] = blob[k]
+                    st.toast("Session restored.")
+                    st.rerun()
+
+
+def _session_blob() -> str:
+    """The session, plus which exports were on disk when it was saved."""
+    import json
+    exports = {}
+    for rel in _EXPORT_SCRIPT:
+        p = _export_path(rel)
+        try:
+            if p.exists():
+                d = json.loads(p.read_text())
+                exports[rel] = {"mtime": p.stat().st_mtime,
+                                "split": d.get("split"),
+                                "version": d.get("version"),
+                                "n_scenarios": d.get("n_scenarios")}
+        except Exception:
+            exports[rel] = {"unreadable": True}
+    return json.dumps({
+        "scenario_draft": st.session_state.get("scenario_draft"),
+        "scenario_sent": st.session_state.get("scenario_sent"),
+        "frozen": st.session_state.get("frozen", []),
+        "day_events": st.session_state.get("day_events", []),
+        "exports": exports,
+    }, indent=2, default=str)
+
+
+def _home_css(c):
+    st.markdown(
+        ("<style>"
+         ".st-key-hero-primary a{height:52px;padding:0 26px;background:%(teal)s;"
+         "color:#fff!important;border:1px solid %(teal)s;border-radius:10px;font-size:15px;"
+         "font-weight:600;display:flex;align-items:center;justify-content:center;gap:10px;"
+         "text-decoration:none;}"
+         ".st-key-hero-primary a:hover{background:%(teal_dark)s;border-color:%(teal_dark)s;}"
+         ".st-key-hero-primary a p{color:#fff!important;margin:0;font-weight:600;}"
+         ".st-key-hero-secondary a{height:52px;padding:0 22px;background:%(surface)s;"
+         "color:%(text)s!important;border:1px solid %(border_strong)s;border-radius:10px;"
+         "font-size:15px;font-weight:500;display:flex;align-items:center;justify-content:center;"
+         "gap:10px;text-decoration:none;}"
+         ".st-key-hero-secondary a p{color:%(text)s!important;margin:0;}"
+         ".st-key-hero-primary a>svg,.st-key-hero-secondary a>svg{display:none;}"
+         "div[class*=\"st-key-gmcards\"]{margin-top:18px;}"
+         # The card body is HTML; the action is a real st.page_link so it cannot
+         # reload the session. The keyed container is the card, and its last child
+         # (the link) is pushed to the bottom so the rows line up.
+         "div[class*=\"st-key-gmcards\"] div[data-testid=\"stColumn\"]{display:flex;"
+         "flex-direction:column;}"
+         "div[class*=\"st-key-gmcards\"] div[data-testid=\"stColumn\"]>div{width:100%%;"
+         "height:100%%;}"
+         "div[class*=\"-card-\"]{box-sizing:border-box;display:flex;flex-direction:column;"
+         "height:100%%;min-height:212px;gap:0!important;background:%(surface)s;"
+         "border:1px solid %(border)s;border-radius:14px;padding:18px;"
+         "transition:border-color .12s ease,box-shadow .12s ease;}"
+         "div[class*=\"-card-\"]>div{flex:0 0 auto;width:100%%;min-height:0;}"
+         "div[class*=\"-card-\"]:hover{border-color:%(border_strong)s;"
+         "box-shadow:0 2px 12px rgba(16,24,32,.07);}"
+         ".gm-ico{width:34px;height:34px;display:flex;align-items:center;"
+         "justify-content:center;border:1px solid %(border)s;border-radius:9px;}"
+         ".gm-title{margin-top:12px;font-size:15px;font-weight:600;color:%(text)s;}"
+         ".gm-desc{margin:6px 0 0 0;font-size:13px;line-height:1.5;color:%(text_body)s;}"
+         "div[class*=\"-go-\"]{margin-top:auto!important;padding-top:16px;}"
+         "div[class*=\"-go-\"] a{display:inline-flex;align-items:center;"
+         "justify-content:center;height:36px;padding:0 16px;border-radius:8px;"
+         "background:%(teal)s;color:#fff!important;font-weight:600;font-size:13px;"
+         "text-decoration:none;}"
+         "div[class*=\"-go-\"] a:hover{background:%(teal_dark)s;}"
+         "div[class*=\"-go-\"] a p{margin:0;color:#fff!important;font-weight:600;}"
+         "div[class*=\"-go-\"] a>svg{display:none;}"
+         ".st-key-home-sources a{color:%(teal)s!important;font-weight:600;"
+         "text-decoration:none;}"
+         ".st-key-home-sources a p{margin:0;font-weight:600;}"
+         "</style>") % {"teal": c["teal"], "teal_dark": c["teal_dark"],
+                        "surface": c["surface"], "text": c["text"],
+                        "text_body": c["text_body"],
+                        "border": c["border"], "border_strong": c["border_strong"]},
+        unsafe_allow_html=True)
+
+
+def page_home():
+    c = ui.T()
+    disp, mono = ui.FONTS["display"], ui.FONTS["mono"]
+    _home_css(c)
+
+    left, right = st.columns([0.46, 0.54], gap="large", vertical_alignment="center")
+    with left:
+        st.markdown(
+            f'<span style="display:inline-flex;align-items:center;gap:8px;padding:7px 14px;'
+            f'border:1px solid {c["amber_border"]};border-radius:999px;background:{c["amber_tint"]};'
+            f'font-family:{mono};font-size:11px;letter-spacing:.07em;text-transform:uppercase;'
+            f'color:{c["amber_text"]};"><svg width="10" height="10" viewBox="0 0 10 10">'
+            f'<circle cx="5" cy="5" r="4" fill="{c["amber"]}"></circle></svg>'
+            f'AI Lab \u00b7 Jeju National University \u00d7 Nanum Energy</span>'
+            f'<h1 style="margin:16px 0 0 0;font-family:{disp};font-size:54px;font-weight:800;'
+            f'line-height:1.04;letter-spacing:-.035em;color:{c["text"]};">Welcome to the<br>'
+            f'<span style="color:{c["teal"]};">GMPPT</span> '
+            f'<span style="color:{c["amber"]};">Bench</span><br>Dashboard</h1>'
+            f'<p style="margin:16px 0 0 0;font-size:17px;line-height:1.55;color:{c["text_body"]};'
+            f'max-width:520px;">Put a shadow anywhere on a solar panel, watch the power curve '
+            f'change shape, and see which tracking algorithm still finds the true peak.</p>',
+            unsafe_allow_html=True)
+        b1, b2 = st.columns([1, 1.25])
+        with b1:
+            with st.container(key="hero-primary"):
+                st.page_link(P["panels"], label="Start exploring  \u2192")
+        with b2:
+            with st.container(key="hero-secondary"):
+                st.page_link(P["run"], label="\u25b6  Watch a worked example")
+        st.markdown(
+            f'<p style="margin:14px 0 0 0;font-size:13px;line-height:1.5;color:{c["text_muted"]};'
+            f'max-width:520px;">No account and no setup. Every panel here is simulated on a model '
+            f'matched to within about one per cent of 616 laboratory flash tests.</p>',
+            unsafe_allow_html=True)
+    with right:
+        st.markdown(
+            f'<div style="background:{c["surface"]};border:1px solid {c["border"]};'
+            f'border-radius:16px;padding:18px 20px 12px 20px;">{_HERO_SVG}'
+            f'<p style="margin:6px 0 0 0;text-align:center;font-size:12.5px;color:{c["text_muted"]};">'
+            f'The same panel on the same afternoon — compared with and without partial shading.'
+            f'</p></div>', unsafe_allow_html=True)
+
+    st.markdown(
+        f'<div style="margin-top:28px;text-align:center;font-family:{mono};font-size:12px;'
+        f'letter-spacing:.14em;text-transform:uppercase;color:{c["text_muted"]};">'
+        f'What you can do here</div>', unsafe_allow_html=True)
+    _home_cards(_CARD_TEXT, _CARD_ICONS, _CARD_LINKS, "gmcards")
+
+    st.markdown(
+        f'<div style="margin-top:24px;text-align:center;font-family:{mono};font-size:12px;'
+        f'letter-spacing:.14em;text-transform:uppercase;color:{c["text_muted"]};">'
+        f'A separate engine</div>', unsafe_allow_html=True)
+    _home_cards(_SANDBOX_CARD_TEXT, _SANDBOX_CARD_ICONS, _SANDBOX_CARD_LINKS,
+                "gmcards-sandbox")
+
+    _session_io()
+
+    st.markdown(
+        f'<div style="margin-top:28px;display:flex;align-items:center;gap:16px;padding-top:18px;'
+        f'border-top:1px solid {c["border"]};font-size:12.5px;color:{c["text_muted"]};">'
+        f'<span>Simulated modules only \u2014 no field measurements behind these figures yet.</span>'
+        f'<span style="margin-left:auto;font-family:{mono};">Dept. of Computer Engineering, '
+        f'Jeju National University</span></div>', unsafe_allow_html=True)
+    with st.container(key="home-sources"):
+        st.page_link(P["sources"], label="Where the numbers come from \u2192")
+
+
+# =========================================================================== #
+# Explore
+# =========================================================================== #
+# =========================================================================== #
+# Explore · The panels  — wired to the VALIDATED engine (gmppt.device) and to the
+# SAME module set `phase2/p7_tracker_comparison.py --split val` runs on.
+#
+# That is `dataset.module_split().val`, NOT `scenarios.split_modules(pool)[1]`.
+# The latter is the 20% held-out TEST set, which dataset.py reserves for a single
+# ledgered opening through p3_final_comparison.py --confirm-test; p7's docstring
+# says so explicitly. An earlier revision of this dashboard drew its dropdown
+# from that set and called it "validation", which spent the one set whose
+# independence the project protects. SPLIT_NAME travels with every figure.
+# =========================================================================== #
+SPLIT_NAME = "val"
+
+
+@st.cache_resource(show_spinner=False)
+def _cec_table():
+    from pvlib import pvsystem
+    return pvsystem.retrieve_sam("CECMod").T
+
+
+@st.cache_data(show_spinner=False)
+def _pool():
+    return pd.read_parquet(_gcfg.CEC_POOL)
+
+
+@st.cache_data(show_spinner=False)
+def _val_module_names() -> frozenset:
+    """The validation module set, resolved through the same call p7 --split val
+    makes. Imported, never re-derived."""
+    return frozenset(str(m) for m in _ds.module_split().val)
+
+
+def _in_val(name: str) -> bool:
+    return str(name) in _val_module_names()
+
+
+@st.cache_data(show_spinner=False)
+def _validation_modules():
+    """A curated few VALIDATION modules for the panel dropdown."""
+    pool = _pool()
+    names = [n for n in _val_module_names() if n in pool.index]
+    h = pool.loc[names].copy()
+    h["P"] = h["V_mp_ref"] * h["I_mp_ref"]
+    wanted = [(72, 330, 350, "72-cell c-Si · 3 bypass diodes · ~340 W"),
+              (60, 270, 290, "60-cell c-Si · 3 bypass diodes · ~280 W"),
+              (72, 300, 330, "72-cell c-Si · 3 bypass diodes · ~315 W")]
+    out, seen = [], set()
+    for nc, lo, hi, lab in wanted:
+        s = h[(h["N_s"] == nc) & (h["P"].between(lo, hi))].sort_values("P")
+        if len(s):
+            nm = str(s.index[len(s) // 2])
+            if nm not in seen:
+                out.append((lab, nm)); seen.add(nm)
+    return out
+
+
+@st.cache_data(show_spinner=False)
+def _mparams(name):
+    r = _cec_table().loc[name]
+    num = lambda k: float(pd.to_numeric(r[k]))
+    return _eng.ModuleParams(name=name, N_s=int(num("N_s")), alpha_sc=num("alpha_sc"),
+                             a_ref=num("a_ref"), I_L_ref=num("I_L_ref"),
+                             I_o_ref=num("I_o_ref"), R_sh_ref=num("R_sh_ref"),
+                             R_s=num("R_s"), Adjust=num("Adjust"))
+
+
+def _key(irr):
+    """Hashable cache key for an irradiance pattern (scalars or per-group lists)."""
+    return tuple(tuple(float(x) for x in e) if isinstance(e, (list, tuple)) else float(e)
+                 for e in irr)
+
+
+def geometry_of(irr) -> str:
+    """The `scenarios.Scenario.geometry` tag implied by an irradiance argument.
+
+    Derived from the pattern itself so a scenario can never be filed under a
+    geometry it does not have. Matches scenarios.py's own definitions:
+      uniform          every substring the same scalar
+      sub_substring    at least one substring carries a per-cell-group list
+      whole_substring  substrings uniform but differing
+    """
+    entries = list(irr)
+    if any(isinstance(e, (list, tuple)) for e in entries):
+        return "sub_substring"
+    vals = [float(e) for e in entries]
+    return "uniform" if max(vals) - min(vals) < 1e-9 else "whole_substring"
+
+
+def geometry_label(irr) -> str:
+    """The geometry tag as shown to a reader.
+
+    scenarios.py's sub_substring shades ONE cell group in ONE substring. The
+    shadow controls here can shade a cell group on every substring at once, which
+    is the same geometry class but a different case, so it is named as such
+    rather than passed off as the harness's."""
+    g = geometry_of(irr)
+    if g == "sub_substring" and all(isinstance(e, (list, tuple)) for e in irr):
+        return "sub-substring (all strips)"
+    return g.replace("_", "-")
+
+
+@st.cache_data(show_spinner=False)
+def _sim(name, irr_key, T):
+    """Validated module curve + peak analysis, restricted to V>=0 and V-ascending."""
+    mp = _mparams(name)
+    irr = [list(e) if isinstance(e, tuple) else float(e) for e in irr_key]
+    c = _eng.module_iv(mp, irr, T, bd=_gcfg.breakdown())
+    a = _eng.analyse(c)
+    V, I, P = c["V"], c["I"], c["P"]
+    m = V >= 0
+    V, I, P = V[m], I[m], P[m]
+    o = np.argsort(V)
+    return dict(V=V[o], I=I[o], P=P[o], gmpp=a["gmpp"], peaks=a["peaks"],
+                n_peaks=a["n_peaks"], voc=float(V.max()))
+
+
+def _substring_voltages(name, irr, T, at_current):
+    """Per-substring terminal voltage at a given string current — for the bypass
+    table and the operating-point view. Recomputed only for the inspected panel."""
+    mp = _mparams(name); bd = _gcfg.breakdown(); bp = _eng.Bypass(temp_c=T)
+    n_sub = _gcfg.N_SUBSTRINGS
+    base = mp.N_s // n_sub
+    counts = [base] * n_sub
+    for k in range(mp.N_s - base * n_sub):
+        counts[k] += 1
+    out = []
+    for entry, cnt in zip(irr, counts):
+        sub = _eng.scale_to_substring(mp, cnt / mp.N_s)
+        if np.isscalar(entry):
+            v, ie = _eng.substring_element_iv(sub, float(entry), T, bd, bp)
+        else:
+            v, ie = _eng.substring_element_iv_subshaded(sub, list(entry), T, bd, bp)
+        vk = float(np.interp(at_current, ie[::-1], v[::-1]))
+        out.append(vk)
+    return out, bp.clamp_voltage
+
+
+def _event_pattern(obj, depth, width, runs, edge, base_G,
+                   n_sub=_gcfg.N_SUBSTRINGS, n_groups=3):
+    """Map the shadow controls to a per-substring irradiance argument for the
+    validated engine. 'across' -> sub-substring on every strip (deepest multi-
+    peak); 'along' -> whole strips shaded; 'diagonally' -> a staircase; cloud /
+    soiling -> a graded blanket over the whole module."""
+    lvl = float(depth)
+    if edge.startswith("soft"):
+        lvl = (lvl + base_G) / 2.0
+
+    def grp(n_shaded):
+        g = [float(base_G)] * n_groups
+        for k in range(int(min(n_shaded, n_groups))):
+            g[k] = lvl if not (edge.startswith("dappled") and k % 2) else (lvl + base_G) / 2.0
+        return g
+
+    if obj in ("Cloud", "Soiling"):
+        return [max(lvl, base_G * f) for f in (0.55, 0.70, 0.85)][:n_sub]
+    if runs.startswith("along"):
+        ns = max(1, min(n_sub - 1, round(width * n_sub)))
+        return [lvl if s < ns else float(base_G) for s in range(n_sub)]
+    if runs.startswith("diag"):
+        return [grp(max(1, round(width * (s + 1)))) for s in range(n_sub)]
+    ns = max(1, min(n_groups, round(width * n_groups)))
+    return [grp(ns) for _ in range(n_sub)]
+
+
+# --------------------------------------------------------------------------- #
+# The scenario store. Two states, one shape (R3).
+#
+#   scenario_draft  what The panels is showing right now — rewritten every render
+#   scenario_sent   what Testing is running — written only by "Send to trackers"
+#
+# Keeping them apart is what lets the banner say "edited since sent" instead of
+# letting an edit on Explore silently change the curve a Testing page already
+# drew. `hash` is what the two are compared on.
+# --------------------------------------------------------------------------- #
+def _scenario(module, temp, irr, label) -> dict:
+    import datetime as _d
+    irr_l = [list(e) if isinstance(e, (list, tuple)) else float(e) for e in irr]
+    return {"module": str(module), "temp": float(temp), "label": str(label),
+            "irr": irr_l,
+            "geometry": geometry_of(irr_l),
+            "geometry_label": geometry_label(irr_l),
+            "pattern": " / ".join(
+                ("[" + ",".join(f"{float(x):.0f}" for x in e) + "]")
+                if isinstance(e, (list, tuple)) else f"{float(e):.0f}"
+                for e in irr_l) + " W/m²",
+            "split": SPLIT_NAME if _in_val(module) else "not in the validation split",
+            "engine": "validated",
+            "created_at": _d.datetime.now().isoformat(timespec="seconds"),
+            "hash": _scenario_hash(module, temp, irr_l)}
+
+
+def _scenario_hash(module, temp, irr) -> str:
+    import hashlib
+    payload = repr((str(module), round(float(temp), 6), _key(irr)))
+    return hashlib.sha1(payload.encode()).hexdigest()[:12]
+
+
+def _set_draft(module, temp, irr, label):
+    st.session_state["scenario_draft"] = _scenario(module, temp, irr, label)
+
+
+def _send_scenario():
+    """Copy the draft to the sent slot — the one write Testing reads."""
+    draft = st.session_state.get("scenario_draft")
+    if draft:
+        st.session_state["scenario_sent"] = dict(draft)
+    return draft
+
+
+def _dfmt(p, unit):
+    return f"{p:g}{unit}"
+
+
+def _dual_sel(key, presets, unit):
+    sel = st.session_state[f"{key}_sel"]
+    if sel != "Custom\u2026":
+        labels = [_dfmt(p, unit) for p in presets]
+        v = float(presets[labels.index(sel)])
+        st.session_state[f"{key}_num"] = v
+        st.session_state[key] = v
+
+
+def _dual_num(key, presets, unit):
+    v = float(st.session_state[f"{key}_num"])
+    st.session_state[key] = v
+    labels = [_dfmt(p, unit) for p in presets]
+    st.session_state[f"{key}_sel"] = labels[presets.index(v)] if v in presets else "Custom\u2026"
+
+
+def _dual(label, key, presets, unit, step, vmin, vmax, default, help=None,
+          disabled=False):
+    """A single dropdown of presets (the extra editable box was removed per request)."""
+    st.session_state.setdefault(key, float(default))
+    cur = st.session_state[key]
+    if cur not in presets:
+        cur = min(presets, key=lambda p: abs(float(p) - float(cur)))
+        st.session_state[key] = float(cur)
+    labels = [_dfmt(p, unit) for p in presets]
+    st.caption(label)
+    sel = st.selectbox(label, labels, index=presets.index(cur), key=f"{key}_pick",
+                       label_visibility="collapsed", help=help, disabled=disabled)
+    v = float(presets[labels.index(sel)])
+    st.session_state[key] = v
+    return v
+
+
+def _array_svg(rows, per, shaded_idx, sel_idx, obj_color, c, sel_id=""):
+    lm, gap, pw, ph, top = 66, 12, 96, 62, 22
+    W = lm + per * (pw + gap)
+    H = top + rows * (ph + gap) + 4
+    p = [f'<svg viewBox="0 0 {W} {H}" style="width:100%;height:auto;">',
+         f'<rect x="0" y="0" width="{W}" height="{H}" rx="12" fill="{c["muted_fill"]}"/>']
+    # a soft pole-shadow band across the shaded block
+    if shaded_idx:
+        xs = [lm + (i % per) * (pw + gap) for i in shaded_idx]
+        ys = [top + (i // per) * (ph + gap) for i in shaded_idx]
+        x0, x1 = min(xs) - 6, max(xs) + pw + 6
+        y0, y1 = min(ys) - 4, max(ys) + ph + 4
+        p.append(f'<polygon points="{x0+28:.0f},{y0:.0f} {x1:.0f},{y0:.0f} '
+                 f'{x1-28:.0f},{y1:.0f} {x0:.0f},{y1:.0f}" fill="#2B3238" opacity="0.16"/>')
+    for r in range(rows):
+        y = top + r * (ph + gap)
+        p.append(f'<text x="6" y="{y+ph/2+4:.0f}" font-family="IBM Plex Mono,monospace" '
+                 f'font-size="10" fill="{c["text_muted"]}">STRING {chr(65+r)}</text>')
+        for col in range(per):
+            i = r * per + col
+            x = lm + col * (pw + gap)
+            p.append(f'<rect x="{x}" y="{y}" width="{pw}" height="{ph}" rx="4" fill="{c["panel"]}"/>')
+            p.append(f'<path d="M{x+pw/3:.0f} {y}v{ph}M{x+2*pw/3:.0f} {y}v{ph}'
+                     f'M{x} {y+ph/2:.0f}h{pw}" stroke="#33566B" stroke-width="1"/>')
+            if i in shaded_idx:
+                p.append(f'<rect x="{x}" y="{y}" width="{pw}" height="{ph}" rx="4" '
+                         f'fill="{obj_color}" opacity="0.5"/>')
+            if i == sel_idx:
+                p.append(f'<rect x="{x-2}" y="{y-2}" width="{pw+4}" height="{ph+4}" rx="6" '
+                         f'fill="none" stroke="{c["amber"]}" stroke-width="3"/>')
+                p.append(f'<rect x="{x}" y="{y-17}" width="90" height="16" rx="4" '
+                         f'fill="{c["amber"]}"/>')
+                p.append(f'<text x="{x+6}" y="{y-5}" font-family="IBM Plex Mono,monospace" '
+                         f'font-size="10" fill="#ffffff">{sel_id} selected</text>')
+    p.append('</svg>')
+    return "".join(p)
+
+
+def _daytimeline_svg(c):
+    W, H, lm = 1120, 168, 140
+    x0, x1 = lm, W - 10
+    lanes = [("Inter-row shading", "#AFC9E3", [(0.05, 0.20)]),
+             ("Pole or vent shadow", "#F0C68A", [(0.27, 0.55)]),
+             ("Cloud passes", "#AFC9E3", [(0.80, 0.98)]),
+             ("Soiling", "#E9A08C", [(0.02, 0.98)])]
+    X = lambda f: x0 + f * (x1 - x0)
+    lh, ly0 = 26, 8
+    p = [f"<svg viewBox='0 0 {W} {H}' style='width:100%;height:168px;margin-top:10px'>"]
+    for k, (name, col, blocks) in enumerate(lanes):
+        y = ly0 + k * (lh + 8)
+        p.append(f"<text x='0' y='{y+lh/2+4:.0f}' font-family='IBM Plex Sans,sans-serif' "
+                 f"font-size='11.5' fill='{c['text_muted']}'>{name}</text>")
+        p.append(f"<rect x='{x0}' y='{y}' width='{x1-x0}' height='{lh}' rx='5' "
+                 f"fill='{c['muted_fill']}'/>")
+        for a, b in blocks:
+            p.append(f"<rect x='{X(a):.0f}' y='{y+3}' width='{X(b)-X(a):.0f}' "
+                     f"height='{lh-6}' rx='4' fill='{col}'/>")
+    yp = ly0 + 1 * (lh + 8)
+    p.append(f"<rect x='{X(0.27):.0f}' y='{yp+3}' width='{X(0.55)-X(0.27):.0f}' height='{lh-6}' "
+             f"rx='4' fill='none' stroke='{c['amber']}' stroke-width='2'/>")
+    p.append(f"<text x='{X(0.285):.0f}' y='{yp+lh/2+4:.0f}' font-family='IBM Plex Mono,monospace' "
+             f"font-size='10' fill='#7A5A1E'>selected</text>")
+    ay = ly0 + len(lanes) * (lh + 8) + 4
+    for f, lab in [(0, "06:00"), (0.25, "09:00"), (0.5, "12:00"), (0.75, "15:00"), (1, "18:00")]:
+        p.append(f"<text x='{X(f)-14:.0f}' y='{ay+12}' font-family='IBM Plex Mono,monospace' "
+                 f"font-size='10' fill='{c['text_muted']}'>{lab}</text>")
+    phx = X(0.78)
+    p.append(f"<line x1='{phx:.0f}' y1='4' x2='{phx:.0f}' y2='{ay+2}' stroke='{c['amber']}' "
+             f"stroke-width='1.5'/><circle cx='{phx:.0f}' cy='4' r='5' fill='{c['amber']}'/>")
+    p.append("</svg>")
+    return "".join(p)
+
+
+def _module_face_svg(irr, base_G, c):
+    W, H = 150, 104
+    sw = (W - 12) / 3.0
+    p = [f'<svg viewBox="0 0 {W} {H}" style="width:150px;height:104px;">',
+         f'<rect x="6" y="6" width="{W-12}" height="{H-24}" fill="{c["panel"]}"/>']
+    for s in range(3):
+        x = 6 + s * sw
+        if s > 0:
+            p.append(f'<line x1="{x:.0f}" y1="6" x2="{x:.0f}" y2="{H-18}" '
+                     f'stroke="#7FA5A8" stroke-width="1.5"/>')
+        entry = irr[s] if s < len(irr) else base_G
+        groups = list(entry) if isinstance(entry, (list, tuple)) else [entry, entry, entry]
+        gh = (H - 24) / len(groups)
+        for gi, gv in enumerate(groups):
+            if gv < base_G - 1:
+                op = 0.62 * (1 - gv / max(base_G, 1)) + 0.15
+                p.append(f'<rect x="{x:.0f}" y="{6 + gi*gh:.0f}" width="{sw:.0f}" '
+                         f'height="{gh:.0f}" fill="#101A20" opacity="{op:.2f}"/>')
+        p.append(f'<text x="{x + sw/2 - 6:.0f}" y="{H-4}" font-family="IBM Plex Mono,monospace" '
+                 f'font-size="10" fill="{c["text_muted"]}">S{s+1}</text>')
+    p.append('</svg>')
+    return "".join(p)
+
+
+# --- event-based day: model + runner (functional; drag replaced by timing sliders) ---
+# The drifting shadow is one substring wide and crosses the module once per event
+# window. Declaring the width here fixes the sweep rate: over `slices` samples no
+# substring's coverage can change by more than (n_sub + DRIFT_WIDTH)/slices of
+# its own width per slice.
+DRIFT_WIDTH = 1.0
+
+
+def _day_event_state(events, time_hour, base_G, n_sub=3):
+    """Convert the configured day events into one instantaneous substring state.
+
+    This is the bridge between the temporal event editor and the static scenario
+    representation used by the simulator/scenario workflow. It does not replace
+    either engine; it only produces the same per-substring irradiance description
+    at a selected instant.
+    """
+    time_hour = float(time_hour)
+    base_G = float(base_G)
+    frac_day = (time_hour - 6.0) / 12.0
+    sun_G = base_G * float(np.clip(np.sin(np.pi * frac_day), 0.0, None))
+    sun_G = max(1.0, sun_G)
+    irr = [sun_G] * int(n_sub)
+    active = []
+
+    for ev in events:
+        t0 = float(ev.get("t0", 0.0))
+        t1 = float(ev.get("t1", 1.0))
+        if not (t0 <= frac_day <= t1):
+            continue
+        kind = str(ev.get("kind", "Pole or vent"))
+        sub, depth = _KIND_MAP.get(kind, (1, 0.4))
+        f = float(np.clip((frac_day - t0) / max(t1 - t0, 1e-9), 0.0, 1.0))
+        motion = ev.get("motion", "fixed in place")
+        if motion == "grows through the event":
+            depth = 1.0 - (1.0 - float(depth)) * f
+        elif motion == "drifts across the strips" and sub != "all":
+            # A continuous edge sweep, not a jump between strips. The shadow is
+            # DRIFT_WIDTH substrings wide and its leading edge crosses the module
+            # once per event window, so each substring's irradiance ramps in
+            # proportion to how much of it the shadow covers. The previous
+            # int(f * n_sub) snapped the whole shadow from one strip to the next
+            # between slices, which is a teleport no sun makes. (R17)
+            lead = f * (int(n_sub) + DRIFT_WIDTH) - DRIFT_WIDTH
+            for s in range(int(n_sub)):
+                cover = max(0.0, min(s + 1.0, lead + DRIFT_WIDTH) - max(float(s), lead))
+                if cover > 0.0:
+                    irr[s] = min(irr[s], sun_G * (1.0 - cover * (1.0 - float(depth))))
+            active.append(kind)
+            continue
+
+        if sub == "all":
+            irr = [min(x, sun_G * float(depth)) for x in irr]
+        else:
+            sub = int(np.clip(sub, 0, int(n_sub) - 1))
+            irr[sub] = min(irr[sub], sun_G * float(depth))
+        active.append(kind)
+
+    return [float(max(1.0, x)) for x in irr], sun_G, active
+
+
+def _day_sample_scenarios(events, base_G, temp, module, step_minutes=15):
+    """Sample active day-event states into static scenario records.
+
+    The records are intentionally engine-neutral recipes: the event timeline
+    supplies time/irradiance/shading state, while the interactive Simulator
+    supplies its own datasheet module. No validated CEC module is silently
+    converted into a different datasheet model.
+    """
+    if not events:
+        return []
+    step = max(5, int(step_minutes))
+    start = min(18.0, max(6.0, min(6.0 + float(e.get("t0", 0))*12 for e in events)))
+    end = max(6.0, min(18.0, max(6.0 + float(e.get("t1", 1))*12 for e in events)))
+    times = np.arange(start, end + 1e-9, step / 60.0)
+    out = []
+    for h in times:
+        irr, sun_G, active = _day_event_state(events, float(h), base_G, _gcfg.N_SUBSTRINGS)
+        if not active:
+            continue
+        out.append({
+            "time_hour": round(float(h), 2),
+            "time_label": f"{int(h):02d}:{int(round((h % 1) * 60)) % 60:02d}",
+            "module_source": str(module),
+            "temperature_C": float(temp),
+            "base_irradiance_Wm2": float(sun_G),
+            "substring_irradiance_Wm2": irr,
+            "active_events": active,
+            "source": "Explore · The panels · day-event timeline",
+        })
+    return out
+
+
+# kind -> (target substring index or "all", light left as a fraction of the sun level)
+_KIND_MAP = {
+    "Row in front": (0, 0.35), "Building edge": (0, 0.40),
+    "Pole or vent": (1, 0.28), "Tree branch": (1, 0.45), "Snow band": ("all", 0.55),
+    "Paint your own": (1, 0.40),
+    "Cloud": ("all", 0.55),
+    "Soiling": ("all", 0.80), "Bird dropping": (2, 0.20), "Leaf": (2, 0.30),
+}
+_KIND_LANE = {"Row in front": 0, "Building edge": 0,
+              "Pole or vent": 1, "Tree branch": 1, "Snow band": 1, "Paint your own": 1,
+              "Cloud": 2, "Soiling": 3, "Bird dropping": 3, "Leaf": 3}
+_DAY_LANES = ["Inter-row shading", "Pole or vent shadow", "Cloud passes", "Soiling"]
+_DAY_COL = {0: "#AFC9E3", 1: "#F0C68A", 2: "#AFC9E3", 3: "#E9A08C"}
+
+
+_DAY_MOTIONS = ["fixed in place", "drifts across the strips", "grows through the event"]
+
+
+def _day_motions_for(kind):
+    """Whole-module events (cloud, soiling, snow) have no single strip to drift across."""
+    sub = _KIND_MAP.get(kind, (1, 0.4))[0]
+    return [m for m in _DAY_MOTIONS if not (sub == "all" and m.startswith("drifts"))]
+
+
+def _day_window_from_hour(hour, duration=1.5):
+    """Return a normalized 06:00–18:00 event window starting at `hour`."""
+    hour = float(np.clip(hour, 6.0, 18.0))
+    duration = float(max(0.25, duration))
+    end = min(18.0, hour + duration)
+    start = hour
+    # Keep the default duration when the playhead is near 18:00 by shifting left.
+    if end - start < duration:
+        start = max(6.0, end - duration)
+    return (start - 6.0) / 12.0, (end - 6.0) / 12.0
+
+
+def _day_uid() -> str:
+    from uuid import uuid4
+    return uuid4().hex[:8]
+
+
+def _day_migrate(events):
+    """Give every event a stable id.
+
+    Widgets used to be keyed by list position, so deleting an event shifted every
+    later event's window and motion onto its neighbour. Keys follow the event
+    now, not its index. (R4)
+    """
+    for ev in events or []:
+        if not ev.get("uid"):
+            ev["uid"] = _day_uid()
+    return events
+
+
+def _day_drop(uid):
+    """Remove one event and the widget state that belonged to it."""
+    events = st.session_state.get("day_events") or []
+    st.session_state["day_events"] = [e for e in events if e.get("uid") != uid]
+    for k in (f"day_win_{uid}", f"day_mot_{uid}"):
+        st.session_state.pop(k, None)
+    st.session_state.pop("day_scenario_samples", None)   # derived from the events
+    st.session_state.pop("day_ran", None)
+
+
+def _day_add(kind):
+    """Add an event at the current timeline playhead instead of a hard-coded slot."""
+    st.session_state.setdefault("day_events", [])
+    hour = float(st.session_state.get("day_time", 15.0))
+    t0, t1 = _day_window_from_hour(hour, duration=1.5)
+    events = st.session_state["day_events"]
+    events.append({
+        "kind": kind,
+        "t0": t0,
+        "t1": t1,
+        "motion": "fixed in place",
+        "created_at_hour": hour,
+        "uid": _day_uid(),
+    })
+    st.session_state.pop("day_scenario_samples", None)
+    st.session_state.pop("day_ran", None)
+
+
+def _day_timeline_svg(events, playhead, c):
+    W, H, lm = 1120, 168, 140
+    x0, x1 = lm, W - 10
+    X = lambda f: x0 + f * (x1 - x0)
+    lh, ly0 = 26, 8
+    p = [f"<svg viewBox='0 0 {W} {H}' style='width:100%;height:168px;margin-top:8px'>"]
+    for k, name in enumerate(_DAY_LANES):
+        y = ly0 + k * (lh + 8)
+        p.append(f"<text x='0' y='{y+lh/2+4:.0f}' font-family='IBM Plex Sans,sans-serif' "
+                 f"font-size='11.5' fill='{c['text_muted']}'>{name}</text>")
+        p.append(f"<rect x='{x0}' y='{y}' width='{x1-x0}' height='{lh}' rx='5' "
+                 f"fill='{c['muted_fill']}'/>")
+    for ev in events:
+        lane = _KIND_LANE.get(ev["kind"], 1)
+        y = ly0 + lane * (lh + 8)
+        a, b = X(max(0, ev["t0"])), X(min(1, ev["t1"]))
+        p.append(f"<rect x='{a:.0f}' y='{y+3}' width='{max(6,b-a):.0f}' height='{lh-6}' rx='4' "
+                 f"fill='{_DAY_COL[lane]}'/>")
+        p.append(f"<text x='{a+6:.0f}' y='{y+lh/2+4:.0f}' font-family='IBM Plex Mono,monospace' "
+                 f"font-size='10' fill='#2B2A20'>{ev['kind']}</text>")
+    ay = ly0 + len(_DAY_LANES) * (lh + 8) + 4
+    for f, lab in [(0, "06:00"), (0.25, "09:00"), (0.5, "12:00"), (0.75, "15:00"), (1, "18:00")]:
+        p.append(f"<text x='{X(f)-14:.0f}' y='{ay+12}' font-family='IBM Plex Mono,monospace' "
+                 f"font-size='10' fill='{c['text_muted']}'>{lab}</text>")
+    phx = X(max(0, min(1, playhead)))
+    p.append(f"<line x1='{phx:.0f}' y1='4' x2='{phx:.0f}' y2='{ay+2}' stroke='{c['amber']}' "
+             f"stroke-width='1.5'/><circle cx='{phx:.0f}' cy='4' r='5' fill='{c['amber']}'/>")
+    p.append("</svg>")
+    return "".join(p)
+
+
+@st.cache_data(show_spinner=True)
+def _day_run(module, temp, base_G, events_key):
+    import numpy as np
+    from gmppt import dynamic as dyn, tracking as trk, pso, config as gc, device
+    from gmppt.device import ModuleParams
+    mp = ModuleParams.from_cec(module)
+    slices, SPS = 48, 8
+    times = np.linspace(6.0, 18.0, slices)
+    sun = float(base_G) * np.clip(np.sin(np.pi * (times - 6) / 12), 0, None)
+
+    def curve_at(irr):
+        c = device.module_iv(mp, irr, float(temp), bd=gc.breakdown())
+        a = device.analyse(c)
+        V = np.asarray(c["V"], float); P = np.asarray(c["P"], float)
+        o = np.argsort(V)
+        return (V[o], P[o], float(a["gmpp"]["V"]), float(a["gmpp"]["P"]))
+
+    curves, unshaded = [], []
+    events = [{"kind": k, "t0": t0, "t1": t1, "motion": motion}
+              for k, t0, t1, motion in events_key]
+    # G2, the curve-integrity gate transition.py applies: the power the curve
+    # reports at v_gmpp must reproduce p_gmpp. A slice that fails it is a curve
+    # the trackers would be stepping through incorrectly, so the count is
+    # reported rather than assumed.
+    g2_pass, g2_total, worst_rel = 0, 0, 0.0
+    for ti, g in zip(times, sun):
+        irr, _, _ = _day_event_state(events, float(ti), float(base_G), 3)
+        cur = curve_at(irr)
+        V, Pp, v_g, p_g = cur
+        rel = abs(float(np.interp(v_g, V, Pp)) - p_g) / max(p_g, 1e-9)
+        g2_total += 1
+        g2_pass += int(rel <= 1e-3)
+        worst_rel = max(worst_rel, rel)
+        curves.append(cur)
+        unshaded.append(curve_at([max(1.0, float(g))] * 3)[3])
+
+    bs = np.array([SPS] * slices); scored = np.ones(slices, bool)
+    mk = lambda: dyn.DynamicTrajectory(curves=curves, block_steps=bs, scored=scored,
+                                       module=module)
+    out = {"t": [float(x) for x in np.repeat(times, SPS)],
+           "unshaded": [float(x) for x in np.repeat(unshaded, SPS)], "methods": {}}
+
+    def run(name, fn, **kw):
+        tj = mk(); fn(tj, n_steps=int(bs.sum()), **kw)
+        out["methods"][name] = [float(x) for x in tj.p_hist]
+        out["avail"] = [float(x) for x in tj.avail_hist]
+
+    run("P&O", trk.perturb_and_observe)
+    run("PSO", pso.particle_swarm)
+    model = _c3_model()
+    if model is not None:
+        from gmppt import hybrid as hyb
+        run("Hybrid (bounded)", hyb.make_hybrid(model), temp_c=float(temp))
+    av = np.array(out["avail"])
+    out["energy"] = {m: 100 * float(np.sum(ph)) / max(1e-9, float(np.sum(av)))
+                     for m, ph in out["methods"].items()}
+    out["has_model"] = model is not None
+    out["g2"] = {"passed": int(g2_pass), "total": int(g2_total),
+                 "worst_rel": float(worst_rel), "tol": 1e-3}
+    out["slices"] = int(slices)
+    return out
+
+
+def page_panels():
+    ui.page_intro("Your panels",
+                  "Put a shadow on a panel and see what it does to the power it can make.",
+                  "Explore · The panels")
+    c = ui.T()
+    try:
+        val_mods = _validation_modules()
+        assert val_mods
+    except Exception as e:
+        ui.callout(f"Could not load the validation-module pool ({e}). Make sure the "
+                   "`gmppt/` package and `results/cec_pool.parquet` sit beside "
+                   "`gmppt_app.py`.", "Engine not connected", "limit")
+        return
+
+    label_to_name = dict(val_mods)
+    ctrl, mid, right = st.columns([0.92, 1.5, 1.18], gap="large")
+
+    # ------------------------------------------------------------------ controls
+    with ctrl:
+        with st.expander("1 · The panel", expanded=True):
+            labels = [l for l, _ in val_mods] + ["Nanum target panel — [awaiting spec]"]
+            pick = st.selectbox("Panel model (validation set)", labels, key="gm_panel")
+            awaiting = pick.startswith("Nanum")
+            name = val_mods[0][1] if awaiting else label_to_name[pick]
+            if awaiting:
+                ui.callout("Nanum's target spec is awaited — showing a held-out "
+                           "validation module in the meantime.", "", "info")
+            rows = int(_dual("Rows (strings)", "gm_rows", [1, 2, 3, 4, 6], "", 1, 1, 6, 3))
+            per = int(_dual("Per row", "gm_per", [1, 2, 3, 4, 5, 6, 8], "", 1, 1, 8, 5))
+            mount = st.segmented_control("Mounting", ["Portrait", "Landscape"],
+                                         default="Portrait", key="gm_mount") or "Portrait"
+            st.caption("Orientation decides what a shadow does: across the cell "
+                       "strips, or along them.")
+        n_panels = rows * per
+        ids = [f"{chr(65 + i // per)}-{i % per + 1:02d}" for i in range(n_panels)]
+
+        with st.expander("2 · The shadow", expanded=True):
+            objs = ["Pole or vent", "Row in front", "Tree branch", "Cloud",
+                    "Soiling", "Bird dropping", "Leaf"]
+            obj = st.selectbox("What casts it", objs, key="gm_obj2")
+            # Cloud and soiling are modelled as a graded blanket over the whole
+            # module, so _event_pattern ignores Width and Runs for them. Disabling
+            # the two controls says so instead of letting them look live.
+            covers_all = obj in ("Cloud", "Soiling")
+            depth = _dual("Shadow depth — W/m² under it", "gm_depth2",
+                          [0, 100, 200, 240, 300, 400, 600, 900], " W/m²", 10, 0, 900, 240,
+                          help="Irradiance left under the shadow. Lower = darker.")
+            width = _dual("Width across the panel", "gm_width",
+                          [0.25, 0.4, 0.5, 0.55, 0.75, 1.0], "", 0.05, 0.0, 1.0, 0.55,
+                          help=("Unavailable for cloud and soiling: those cover the whole "
+                                "module, so there is no width to set." if covers_all
+                                else None),
+                          disabled=covers_all)
+            rc1, rc2 = st.columns(2)
+            default_runs = 0 if mount == "Portrait" else 1
+            runs = rc1.selectbox("Runs", ["across the strips", "along the strips",
+                                          "diagonally"], index=default_runs, key="gm_runs",
+                                 disabled=covers_all,
+                                 help="Unavailable for cloud and soiling: those cover the "
+                                      "whole module as a graded blanket, so direction has "
+                                      "nothing to run along." if covers_all else None)
+            edge = rc2.selectbox("Edge", ["hard", "soft (penumbra)", "dappled"], key="gm_edge")
+            if covers_all:
+                shaded_ids = list(ids)
+                st.caption("Cloud and soiling cover the whole array, and are graded across "
+                           "the module rather than following a direction.")
+            else:
+                if "gm_shaded_ids" not in st.session_state:
+                    s0 = max(0, (n_panels - min(3, n_panels)) // 2)
+                    st.session_state["gm_shaded_ids"] = ids[s0:s0 + min(3, n_panels)]
+                st.session_state["gm_shaded_ids"] = [i for i in
+                    st.session_state["gm_shaded_ids"] if i in ids] or ids[:min(3, n_panels)]
+                shaded_ids = st.multiselect("Shade which panels", ids, key="gm_shaded_ids",
+                                            help="Pick exactly which panels the shadow covers.")
+            n_shaded = len(shaded_ids)
+            st.caption("These controls set one single moment. How the shadow moves "
+                       "through the day is set on the day timeline below.")
+
+        with st.expander("3 · Conditions", expanded=False):
+            base_G = int(_dual("Sunlight (W/m²)", "gm_G2",
+                               [200, 400, 600, 800, 910, 1000, 1100], " W/m²", 10, 200, 1100, 910))
+            T = int(_dual("Cell temperature (°C)", "gm_T2",
+                          [10, 25, 43, 55, 70], " °C", 1, 10, 70, 43,
+                          help="Cell (not air) temperature."))
+        # No Run button here: the page is reactive and recomputes on every control
+        # change, so a button would only ever redraw what is already correct.
+        if st.button("Reset shadow", key="gm_reset_shadow", use_container_width=True,
+                     help="Restores the shadow controls to their defaults. The module, "
+                          "the array size and the conditions are left alone."):
+            for _k in ("gm_obj2", "gm_depth2", "gm_width", "gm_runs", "gm_edge",
+                       "gm_shaded_ids"):
+                st.session_state.pop(_k, None)
+            st.toast("Shadow controls reset — module and conditions kept.")
+            st.rerun()
+
+    # ------------------------------------------------------------------ compute
+    pattern = _event_pattern(obj, depth, width, runs, edge, base_G)
+    uniform = [float(base_G)] * _gcfg.N_SUBSTRINGS
+    shaded_idx = {ids.index(x) for x in shaded_ids}
+
+    sh = _sim(name, _key(pattern), T)
+    uns = _sim(name, _key(uniform), T)
+    array_now = len(shaded_idx) * sh["gmpp"]["P"] + (n_panels - len(shaded_idx)) * uns["gmpp"]["P"]
+    array_uns = n_panels * uns["gmpp"]["P"]
+    shadow_type = ("Across the strips" if runs.startswith("across")
+                   else "Along the strips" if runs.startswith("along") else "Diagonal")
+
+    # ------------------------------------------------------------------ center
+    with mid:
+        # The drag and paint tools are gone rather than shown disabled: a control
+        # that can never be enabled is furniture, and the shadow controls on the
+        # left already do the job.
+        th = st.columns([6, 0.7], vertical_alignment="center")
+        th[0].markdown(
+            f"<div class='bh'>Your panels</div>"
+            f"<div style='font-size:13.5px;color:{c['text_muted']}'>{n_panels} panels in "
+            f"{rows} string{'s' if rows > 1 else ''} — pick one to inspect it.</div>",
+            unsafe_allow_html=True)
+        if th[1].button("✕", key="tool_clear", use_container_width=True,
+                        help="Clear the inspected-panel choice and go back to the "
+                             "first shaded panel. Nothing else is reset."):
+            st.session_state.pop("gm_sel", None); st.rerun()
+        default_id = shaded_ids[0] if shaded_ids else ids[0]
+        sel_id = st.selectbox("Inspect panel", ids, index=ids.index(default_id), key="gm_sel")
+        sel_idx = ids.index(sel_id)
+        st.markdown(_array_svg(rows, per, shaded_idx, sel_idx,
+                               ui.EVENT_COLORS.get(obj, "#C2BFB6"), c, sel_id),
+                    unsafe_allow_html=True)
+        ui.kpi_row([
+            # Not "what the array makes": it is the sum of each module sitting at
+            # its own GMPP, which assumes every optimizer has already found it.
+            ("Array upper bound (every optimizer at its GMPP)",
+             f"{array_now/1000:.2f} kW",
+             f"of {array_uns/1000:.2f} kW unshaded", "hero"),
+            ("Shaded panels", str(len(shaded_idx)),
+             "covering everything" if covers_all else f"under the {obj.lower()}"),
+            ("Shadow type", shadow_type, runs),
+        ], weights=[1.3, 1, 1])
+        ui.engine_badge("validated")
+
+    # selected-panel data (real engine)
+    sel_shaded = sel_idx in shaded_idx
+    sel_irr = pattern if sel_shaded else uniform
+    det = sh if sel_shaded else uns
+    vsub, clamp = _substring_voltages(name, sel_irr, T, det["gmpp"]["I"])
+
+    # ------------------------------------------------------------------ right rail
+    with right:
+        with st.container(border=True):
+            st.markdown(
+                f"<div style='display:flex;align-items:baseline;gap:10px;'>"
+                f"<span class='bh'>Panel {sel_id}</span>"
+                f"<span class='bmono' style='font-size:12px;color:{c['text_muted']}'>"
+                f"{'the one under the shadow' if sel_shaded else 'in full sun'}</span></div>",
+                unsafe_allow_html=True)
+            fc, ft = st.columns([1, 1.1], vertical_alignment="center")
+            fc.markdown(_module_face_svg(sel_irr, base_G, c), unsafe_allow_html=True)
+            with ft:
+                def _state(vk):
+                    return ("on" if vk <= clamp + 0.2 else
+                            "partial" if vk < -0.05 else "off")
+                lines = "".join(
+                    f"<div style='display:flex;justify-content:space-between'>"
+                    f"<span style='color:{c['text_muted']}'>bypass D{i+1}</span>"
+                    f"<span style='color:{c['amber_text'] if _state(vk)!='off' else c['text']}'>"
+                    f"{_state(vk)}</span></div>" for i, vk in enumerate(vsub))
+                st.markdown(
+                    f"<div class='bmono' style='font-size:12.5px;"
+                    f"display:flex;flex-direction:column;gap:7px'>{lines}"
+                    f"<div style='display:flex;justify-content:space-between'>"
+                    f"<span style='color:{c['text_muted']}'>V_oc</span>"
+                    f"<span>{det['voc']:.1f} V</span></div>"
+                    f"<div style='display:flex;justify-content:space-between'>"
+                    f"<span style='color:{c['text_muted']}'>peaks</span>"
+                    f"<span>{det['n_peaks']}</span></div></div>", unsafe_allow_html=True)
+
+            v1, v2 = st.columns(2)
+            show = v1.segmented_control("view", ["P–V", "I–V"], default="P–V",
+                                        key="gm_pv", label_visibility="collapsed") or "P–V"
+            show_uns = v2.toggle("Show unshaded", key="gm_showuns")
+
+            fig = go.Figure()
+            if show == "P–V":
+                if show_uns and sel_shaded:
+                    fig.add_trace(go.Scatter(x=uns["V"], y=uns["P"], name="unshaded",
+                                             line=dict(color=ui.REF_COLORS["unshaded"],
+                                                       width=2, dash="dot")))
+                fig.add_trace(go.Scatter(x=det["V"], y=det["P"], name="with shadow",
+                                         line=dict(color=c["teal"], width=3)))
+                ui.mark_gmpp(fig, det["gmpp"]["V"], det["gmpp"]["P"])
+                ui.mark_local_peaks(fig, [(v, i, pw) for (v, i, pw) in det["peaks"]
+                                          if abs(pw - det["gmpp"]["P"]) > 1e-6])
+                ui.style_fig(fig, height=230, x_title="Voltage (V)", y_title="Power (W)")
+            else:
+                fig.add_trace(go.Scatter(x=det["V"], y=det["I"], name="I–V",
+                                         line=dict(color="#2C7FA0", width=3)))
+                ui.style_fig(fig, height=230, x_title="Voltage (V)", y_title="Current (A)")
+            fig.update_layout(showlegend=False, margin=dict(l=48, r=10, t=10, b=40))
+            ui.show_chart(fig)
+
+            with st.container(key="next-panelsend"):
+                if st.button("Send this panel to the trackers  →", key="send_trackers",
+                             type="primary", use_container_width=True):
+                    _send_scenario()
+                    st.switch_page(P["run"])
+
+        ui.callout("Not this page. The optimizer behind this panel measures its own "
+                   "voltage and current, one point at a time, plus one temperature. "
+                   "This view is for you.", "What the algorithm gets to see", "caveat")
+
+    # The draft is rewritten on every render, so Inside a panel always shows what
+    # is on screen here. Testing keeps running whatever was last SENT.
+    _set_draft(name, T, sel_irr, f"Panel {sel_id} · {obj}")
+
+    # ------------------------------------------------------------------ day timeline (functional)
+    _default_t0, _default_t1 = _day_window_from_hour(15.0, duration=1.5)
+    st.session_state.setdefault("day_events", [{"kind": "Pole or vent",
+                                                "t0": _default_t0, "t1": _default_t1,
+                                                "motion": "fixed in place",
+                                                "created_at_hour": 15.0,
+                                                "uid": _day_uid()}])
+    _day_migrate(st.session_state["day_events"])   # events restored from a session file
+    with st.container(border=True):
+        hd = st.columns([4, 1.6], vertical_alignment="center")
+        hd[0].markdown(
+            f"<span class='bh' style='font-size:17px'>Shading events over the day</span>"
+            f"<span style='font-size:13px;color:{c['text_muted']};margin-left:10px'>"
+            f"add events, set their timing and motion, then run the whole day</span>",
+            unsafe_allow_html=True)
+        run_day = hd[1].button("Run the whole day through the trackers", key="day_run_btn",
+                               type="primary", use_container_width=True)
+        st.markdown(f"<span style='font-size:11.5px;font-weight:600;letter-spacing:.05em;"
+                    f"text-transform:uppercase;color:{c['text_muted']}'>Add an event</span>",
+                    unsafe_allow_html=True)
+        _kinds = ["Row in front", "Pole or vent", "Tree branch", "Cloud", "Soiling",
+                  "Bird dropping", "Leaf", "Snow band", "Building edge", "Paint your own"]
+        cc = st.columns(len(_kinds))
+        for _k, _kind in enumerate(_kinds):
+            cc[_k].button(_kind, key=f"day_add_{_k}", on_click=_day_add, args=(_kind,),
+                          use_container_width=True)
+        ph_t = st.slider("Event time / playhead", 6.0, 18.0, 15.0, 0.25, key="day_time", format="%.2f")
+        st.caption("Select a time, then add an event. The new event starts at the selected time; adjust its duration and motion below.")
+        st.markdown(_day_timeline_svg(st.session_state["day_events"], (ph_t - 6) / 12, c),
+                    unsafe_allow_html=True)
+        with st.expander("Day behaviour \u2014 timing and motion of each event", expanded=False):
+            st.caption("Motion belongs to the day timeline: it decides how an event "
+                       "changes while it passes, not what the single-moment curve above "
+                       "looks like.")
+            _rm = None
+            for _ev in list(st.session_state["day_events"]):
+                _ev.setdefault("motion", "fixed in place")
+                _uid = _ev["uid"]
+                ec = st.columns([1.5, 2.5, 1.8, 0.5], vertical_alignment="center")
+                ec[0].markdown(f"**{_ev['kind']}**")
+                _w = ec[1].slider(f"window {_uid}", 6.0, 18.0,
+                                  (6 + _ev["t0"] * 12, 6 + _ev["t1"] * 12), 0.25,
+                                  key=f"day_win_{_uid}", label_visibility="collapsed")
+                if (_w[0] - 6) / 12 != _ev["t0"] or (_w[1] - 6) / 12 != _ev["t1"]:
+                    st.session_state.pop("day_scenario_samples", None)
+                    st.session_state.pop("day_ran", None)
+                _ev["t0"], _ev["t1"] = (_w[0] - 6) / 12, (_w[1] - 6) / 12
+                _opts = _day_motions_for(_ev["kind"])
+                if _ev["motion"] not in _opts:
+                    _ev["motion"] = _opts[0]
+                _new_motion = ec[2].selectbox(
+                    f"motion {_uid}", _opts, index=_opts.index(_ev["motion"]),
+                    key=f"day_mot_{_uid}", label_visibility="collapsed",
+                    help="Day-event motion \u2014 how the shadow changes across its own window.")
+                if _new_motion != _ev["motion"]:
+                    st.session_state.pop("day_scenario_samples", None)
+                    st.session_state.pop("day_ran", None)
+                _ev["motion"] = _new_motion
+                if ec[3].button("\u2715", key=f"day_rm_{_uid}"):
+                    _rm = _uid
+            if _rm is not None:
+                _day_drop(_rm); st.rerun()
+            if st.button("Clear all events", key="day_clear"):
+                for _e2 in st.session_state["day_events"]:
+                    for _k2 in (f"day_win_{_e2.get('uid')}", f"day_mot_{_e2.get('uid')}"):
+                        st.session_state.pop(_k2, None)
+                st.session_state["day_events"] = []
+                st.session_state.pop("day_scenario_samples", None)
+                st.session_state.pop("day_ran", None)
+                st.rerun()
+
+        # ------------------------------------------------------------------ scenario bridge
+        # The timeline creates temporal event definitions. Sampling them produces
+        # instantaneous irradiance recipes that the interactive Simulator can load.
+        # The module itself is not silently converted between the validated and
+        # simplified engines.
+        if st.session_state["day_events"]:
+            with st.expander("Use these events as simulator scenarios", expanded=False):
+                st.caption("Sample the active event windows into static 15-minute scenario states. "
+                           "The event timing and substring irradiance are transferred; the "
+                           "Simulator uses its own datasheet module and simplified engine.")
+                if st.button("Create scenario samples", key="day_make_samples", use_container_width=True):
+                    st.session_state["day_scenario_samples"] = _day_sample_scenarios(
+                        st.session_state["day_events"], base_G, T, name, step_minutes=15)
+                samples = st.session_state.get("day_scenario_samples") or []
+                if samples:
+                    st.success(f"Created {len(samples)} instantaneous scenario states from the event window.")
+                    sdf = pd.DataFrame([{
+                        "Time": x["time_label"],
+                        "Sunlight (W/m²)": round(x["base_irradiance_Wm2"]),
+                        "Substring irradiance (W/m²)": str([round(v) for v in x["substring_irradiance_Wm2"]]),
+                        "Events": ", ".join(x["active_events"]),
+                    } for x in samples])
+                    st.dataframe(sdf, hide_index=True, width="stretch")
+                    sc_idx = st.selectbox("Sample to load", range(len(samples)),
+                                          format_func=lambda i: samples[i]["time_label"] + " · " + ", ".join(samples[i]["active_events"]),
+                                          key="day_sample_pick")
+                    if st.button("Load selected irradiance into Simulator", key="day_load_sim",
+                                  type="primary", use_container_width=True):
+                        st.session_state["day_sim_import"] = dict(samples[sc_idx])
+                        st.switch_page(P["sim_setup"])
+                    import json as _json
+                    _day_json = _json.dumps(samples, indent=2)
+                    st.download_button("Download sampled scenarios (JSON)", _day_json,
+                                       "day_event_scenarios.json", "application/json",
+                                       use_container_width=True, key="day_samples_json")
+        # The tracker run itself lives on Testing · Dynamic irradiance, under
+        # "Your day", where it can sit beside the gated EN 50530 result and be
+        # labelled against it. This page builds, times and samples the events.
+        st.session_state["day_context"] = {"module": name, "temp": int(T),
+                                           "base_G": int(base_G)}
+        if run_day:
+            st.switch_page(P["moving"])
+
+
+def page_inside():
+    ui.page_intro("Inside a panel",
+                  "Move the operating point and watch each bypass diode switch on or off.",
+                  "Explore · Inside a panel")
+    draft = st.session_state.get("scenario_draft")
+    if not draft:
+        ui.callout("Set up a shadow on the panels page first — this page explains "
+                   "that result.", "Nothing to show yet", "info")
+        st.page_link(P["panels"], label="Go to the panels →")
+        return
+    st.caption("Showing the scenario you are editing on The panels (the draft), not "
+               "whatever was last sent to Testing.")
+    name, T = draft["module"], float(draft["temp"])
+    irr = [list(e) if isinstance(e, (list, tuple)) else float(e) for e in draft["irr"]]
+    irr_key = _key(irr)
+    det = _sim(name, irr_key, T)
+    voc = det["voc"] or 1.0
+    # The slider's stored value can outlive the scenario it was set for: a new
+    # shadow gives a different V_oc, and a stale value outside [0, voc] makes
+    # st.slider raise. Clamp before rendering. (R7)
+    _v_default = float(det["gmpp"]["V"])
+    if "gm_vop" in st.session_state:
+        try:
+            st.session_state["gm_vop"] = min(max(float(st.session_state["gm_vop"]), 0.0),
+                                             round(voc, 1))
+        except (TypeError, ValueError):
+            st.session_state.pop("gm_vop", None)
+    v_op = st.slider("Terminal voltage (V)", 0.0, round(voc, 1),
+                     round(_v_default, 1), 0.1, key="gm_vop")
+    i_op = float(np.interp(v_op, det["V"], det["I"]))
+    vsub, clamp = _substring_voltages(name, irr, T, i_op)
+
+    rows = []
+    for k, (entry, vk) in enumerate(zip(irr, vsub)):
+        light = (sum(entry) / len(entry)) if isinstance(entry, (list, tuple)) else entry
+        on = vk <= clamp + 0.2
+        rows.append({"Strip": f"S{k+1}", "Light (W/m²)": round(light),
+                     "Bypass diode": "on — current goes around" if on else
+                     ("partial" if vk < -0.05 else "off"),
+                     "Volts it adds": round(vk, 2)})
+
+    left, right = st.columns([1, 1.3], gap="large")
+    with left:
+        ui.kpi_row([("Current", f"{i_op:.2f} A"), ("Power", f"{v_op * i_op:.1f} W")])
+        st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
+        ui.callout("A bypass diode is a switch, not a dimmer. When a shaded strip "
+                   "cannot carry the current its neighbours want, the diode turns on "
+                   "and the strip drops out of the voltage sum. That switch is what "
+                   "puts the steps in the curve. A strip is one substring — the group of "
+                   "cells that shares a bypass diode; the Simulator calls it a substring.",
+                   "Why the curve has steps", "info")
+    with right:
+        # Power first: this is the curve the Home card promises, with every local
+        # peak and the true maximum marked.
+        figp = go.Figure(go.Scatter(x=det["V"], y=det["P"], name="Power",
+                                    line=dict(color=ui.T()["teal"], width=3)))
+        ui.mark_gmpp(figp, det["gmpp"]["V"], det["gmpp"]["P"])
+        ui.mark_local_peaks(figp, [(v, i, pw) for (v, i, pw) in det["peaks"]
+                                   if abs(pw - det["gmpp"]["P"]) > 1e-6])
+        figp.add_vline(x=v_op, line=dict(color=ui.PEAK_COLORS["operating"],
+                                         width=2, dash="dash"))
+        ui.style_fig(figp, height=250, x_title="Voltage (V)", y_title="Power (W)")
+        figp.update_layout(legend=dict(orientation="h", y=1.12, x=0))
+        ui.show_chart(figp, key="inside_pv")
+
+        fig = go.Figure(go.Scatter(x=det["V"], y=det["I"], name="Current",
+                                   line=dict(color="#2C7FA0", width=3)))
+        fig.add_vline(x=v_op, line=dict(color=ui.PEAK_COLORS["operating"], width=2, dash="dash"))
+        ui.style_fig(fig, height=220, x_title="Voltage (V)", y_title="Current (A)")
+        fig.update_layout(showlegend=False)
+        ui.show_chart(fig, key="inside_iv")
+        ui.legend_note(f"{det['n_peaks']} peak(s) · the dashed line is the operating "
+                       f"point you are moving.")
+        ui.engine_badge("validated")
+
+
+
+def page_system():
+    ui.page_intro("Whole system",
+                  "Planned extension: electrical interaction across several modules, "
+                  "strings and array configurations.", "Explore · Whole system")
+    ui.not_built("Whole-system array analysis",
+                 "Every other page models one module and, in the Simulator, scales its power "
+                 "to an array. This page will solve the array itself — series/parallel "
+                 "mismatch between modules and strings, then DC/DC and inverter losses — "
+                 "and separate what shading cost from what tracking cost. It needs a string "
+                 "and inverter model that does not exist yet, so nothing is shown rather "
+                 "than an estimate.")
+    ui.callout("Nothing on this page is computed yet. The array figures you can see today "
+               "are on the Simulator, where array power is the module result multiplied by "
+               "the array scaling.", "Why this page is empty", "info")
+
+
+# =========================================================================== #
+# Simulator — your existing app, unchanged
+# =========================================================================== #
+# =========================================================================== #
+# Simulator · Set up a panel  (the "Bench") — the SIMPLIFIED engine (app.py),
+# with an editable datasheet.  Matches the Bench mockup; sized to the 1440 grid.
+# =========================================================================== #
+def _bench_apply_preset():
+    # Resetting to a preset replaces the datasheet, so an imported-day label no
+    # longer describes what is on screen. (R5)
+    st.session_state.pop("bench_import_meta", None)
+    st.session_state.pop("bench_import_sig", None)
+    p = sim.MODULE_PRESETS.get(st.session_state.get("bench_preset"))
+    if not p:
+        return
+    for f in sim.DS_FIELDS:
+        st.session_state[f"bench_{f}"] = int(p[f]) if f == "Ns" else float(p[f])
+
+
+def _bench_init():
+    st.session_state.setdefault("bench_preset", sim.DEFAULT_PRESET)
+    if "bench_Isc" not in st.session_state:
+        _bench_apply_preset()
+    st.session_state.setdefault("bench_nsub", 3)
+    st.session_state.setdefault("bench_mstr", 5)
+    st.session_state.setdefault("bench_pstr", 3)
+    st.session_state.setdefault("bench_obj", "Custom")
+    st.session_state.setdefault("bench_baseG", 910)
+    st.session_state.setdefault("bench_T", 43)
+
+
+def _bench_pill(obj):
+    n = int(st.session_state.bench_nsub)
+    g = float(st.session_state.bench_baseG)
+    st.session_state.bench_obj = obj
+    if obj == "Pole":
+        vals = [g] * n
+        vals[min(1, n - 1)] = 240.0
+    elif obj == "Cloud":
+        vals = [g * f for f in (0.9, 0.7, 0.5, 0.45, 0.4, 0.35)][:n]
+    elif obj == "Soiling":
+        vals = [g * 0.7] * n
+    else:
+        return
+    for i, v in enumerate(vals):
+        st.session_state[f"bench_s{i}"] = float(round(v))
+
+
+def _bench_obj_change():
+    obj = st.session_state.bench_obj
+    n = int(st.session_state.bench_nsub)
+    g = float(st.session_state.bench_baseG)
+    if obj == "Pole":
+        vals = [g] * n
+        vals[min(1, n - 1)] = 240.0
+    elif obj == "Cloud":
+        vals = [g * f for f in (0.9, 0.7, 0.5, 0.45, 0.4, 0.35)][:n]
+    elif obj == "Soiling":
+        vals = [g * 0.7] * n
+    else:
+        return
+    for i, v in enumerate(vals):
+        st.session_state[f"bench_s{i}"] = float(round(v))
+
+
+@st.cache_data(show_spinner=False)
+def _bench_sim(ds_key, T, sub_key):
+    ds = dict(ds_key); ds["Ns"] = int(ds["Ns"])
+    ref = sim.datasheet_to_ref(ds)
+    cps = ds["Ns"] // len(sub_key)
+    return sim.module_iv(list(sub_key), float(T), cps, ref)
+
+
+def _bench_record(label, ds, n_sub, m_str, p_str, base_G, T, sub_irr, res):
+    """One saved scenario, in the same shape app.py's Saved-scenarios page reads.
+    The extra `bench` block is what Load needs to put every control back."""
+    return dict(
+        label=label,
+        V=[float(x) for x in res["V"]], I=[float(x) for x in res["I"]],
+        P=[float(x) for x in res["P"]], gmpp=[float(x) for x in res["gmpp"]],
+        config={
+            "scenario_name": label,
+            "module": st.session_state.get("bench_preset", "—"),
+            "datasheet": {k: ds[k] for k in sim.DS_FIELDS},
+            "temperature_C": int(T),
+            "base_irradiance_Wm2": int(base_G),
+            "substring_irradiance_Wm2": [float(x) for x in sub_irr],
+            "topology": {"substring_zones": int(n_sub),
+                         "modules_per_string": int(m_str),
+                         "parallel_strings": int(p_str)},
+            "results": {"Vmpp_V": round(float(res["gmpp"][0]), 3),
+                        "Impp_A": round(float(res["gmpp"][1]), 3),
+                        "Pmax_W": round(float(res["gmpp"][2]), 3),
+                        "n_local_peaks": len(res["lmpps"])},
+            "model": {"type": "interactive simulator — single-diode + per-substring bypass",
+                      "note": "Exploratory engine. Not the validated engine behind the "
+                              "benchmark figures."},
+            "bench": {"preset": st.session_state.get("bench_preset"),
+                      "obj": st.session_state.get("bench_obj", "Custom"),
+                      "ds": {k: ds[k] for k in sim.DS_FIELDS},
+                      "nsub": int(n_sub), "mstr": int(m_str), "pstr": int(p_str),
+                      "baseG": int(base_G), "T": int(T),
+                      "sub_irr": [float(x) for x in sub_irr],
+                      "imported_from_day_event": st.session_state.get("bench_import_meta")},
+        })
+
+
+def _bench_label():
+    """Whatever the user typed, else something that identifies the scenario."""
+    name = (st.session_state.get("bench_scen_name") or "").strip()
+    if name:
+        return name
+    preset = str(st.session_state.get("bench_preset", "module")).split(" (")[0]
+    return f"{preset} · {st.session_state.get('bench_obj', 'Custom')}"
+
+
+def _bench_to_dataset(ds, n_sub, m_str, p_str, base_G, T):
+    """Make a dataset reads app.py's own state keys — copy this bench setup into them
+    so 'generate a dataset from this module' is true rather than a label."""
+    for f, v in ds.items():
+        st.session_state[f"p_{f}"] = int(v) if f == "Ns" else float(v)
+    st.session_state["ds_name"] = str(st.session_state.get("bench_preset", "Bench module"))
+    st.session_state["topo_nsub"] = int(n_sub)
+    st.session_state["topo_mstr"] = int(m_str)
+    st.session_state["topo_pstr"] = int(p_str)
+    st.session_state["base_val"] = int(base_G)
+    st.session_state["temp_c"] = int(T)
+
+
+def _bench_save(label, ds, n_sub, m_str, p_str, base_G, T, sub_irr, res):
+    """Append to the one shared scenario list (`frozen`) that Saved scenarios reads."""
+    st.session_state.setdefault("frozen", [])
+    st.session_state.frozen.append(
+        _bench_record(label, ds, n_sub, m_str, p_str, base_G, T, sub_irr, res))
+    # The list is capped at 12. Dropping the oldest silently loses work the user
+    # deliberately kept, so name what went. (R9)
+    while len(st.session_state.frozen) > 12:
+        dropped = st.session_state.frozen.pop(0)
+        st.toast(f"Saved-scenario limit is 12 — removed the oldest: "
+                 f"{dropped.get('label', 'unnamed')}.")
+
+
+def _bench_load(rec):
+    """Put a saved scenario's controls back on Set up a panel, and mark it as run."""
+    b = (rec.get("config") or {}).get("bench")
+    if not b:
+        return False
+    for f, v in b["ds"].items():
+        st.session_state[f"bench_{f}"] = int(v) if f == "Ns" else float(v)
+    if b.get("preset"):
+        st.session_state["bench_preset"] = b["preset"]
+    st.session_state["bench_obj"] = b.get("obj", "Custom")
+    st.session_state["bench_scen_name"] = rec.get("label", "")
+    st.session_state["bench_nsub"] = int(b["nsub"])
+    st.session_state["bench_mstr"] = int(b["mstr"])
+    st.session_state["bench_pstr"] = int(b["pstr"])
+    st.session_state["bench_baseG"] = int(b["baseG"])
+    st.session_state["bench_T"] = int(b["T"])
+    for i, g in enumerate(b["sub_irr"]):
+        st.session_state[f"bench_s{i}"] = float(g)
+    ds_key = tuple(sorted({k: (int(v) if k == "Ns" else float(v))
+                           for k, v in b["ds"].items()}.items()))
+    st.session_state["bench_ran"] = (ds_key, int(b["T"]),
+                                     tuple(float(x) for x in b["sub_irr"]), int(b["nsub"]))
+    return True
+
+
+def _bench_css(c):
+    st.markdown(("<style>"
+        # section-title + mono helpers
+        ".bh{font-family:%(disp)s;font-weight:700;font-size:16px;color:%(text)s;}"
+        ".bmono,.bmono *{font-family:%(mono)s;}"
+        # cards: warm-paper, 1px border, 14px radius (matches the mockup)
+        "div.st-key-benchroot div[data-testid=\"stVerticalBlockBorderWrapper\"]{"
+        "border:1px solid %(border)s!important;border-radius:14px!important;"
+        "background:%(surface)s!important;}"
+        # inputs: clean mono, faint fill, NO +/- steppers
+        "div.st-key-benchroot [data-testid=\"stNumberInput\"] button{display:none!important;}"
+        "div.st-key-benchroot input{background:%(surface)s!important;"
+        "border-color:%(border_strong)s!important;font-family:%(mono)s!important;font-size:13px!important;}"
+        "div.st-key-benchroot [data-testid=\"stWidgetLabel\"] p{font-family:%(mono)s!important;"
+        "font-size:11.5px!important;color:%(muted)s!important;}"
+        # results tab bar: underline the active tab, drop the pill chrome
+        "div.st-key-benchroot [data-baseweb=\"tab-list\"]{gap:2px;border-bottom:1px solid %(border)s;}"
+        "div.st-key-benchroot [data-baseweb=\"tab\"]{font-size:13.5px;padding:9px 13px;color:%(muted)s;}"
+        "div.st-key-benchroot [data-baseweb=\"tab\"][aria-selected=\"true\"]{color:%(teal)s;}"
+        "div.st-key-benchroot [data-baseweb=\"tab-highlight\"]{background:%(teal)s;}"
+        # inline dark Run button
+        "div.st-key-benchrun button{background:%(text)s!important;color:#fff!important;"
+        "border:none!important;height:44px;font-weight:600;}"
+        "div.st-key-benchrun button p{color:#fff!important;}"
+        # pill-shaped shading-object buttons
+        "div.st-key-benchpills button{border-radius:999px!important;height:34px;}"
+        # sub-tab row links
+        "div.st-key-benchtabs a{padding:10px 14px;border-radius:0;font-size:14px;"
+        "color:%(text_body)s!important;text-decoration:none;border-bottom:3px solid transparent;}"
+        "div.st-key-benchtabs a p{margin:0;}"
+        "</style>") % {"disp": ui.FONTS["display"], "mono": ui.FONTS["mono"],
+                       "text": c["text"], "text_body": c["text_body"], "muted": c["text_muted"],
+                       "border": c["border"], "border_strong": c["border_strong"],
+                       "surface": c["surface"], "teal": c["teal"]},
+        unsafe_allow_html=True)
+
+
+def _bh(title):
+    return f"<span class='bh'>{title}</span>"
+
+
+def page_sim_setup():
+    _bench_init()
+    c = ui.T()
+    day_import = st.session_state.pop("day_sim_import", None)
+    _bench_css(c)
+
+    with st.container(key="benchroot"):
+        if day_import:
+            imported_irr = list(day_import.get("substring_irradiance_Wm2", []))
+            st.session_state["bench_obj"] = "Custom"
+            st.session_state["bench_baseG"] = int(round(day_import.get("base_irradiance_Wm2", st.session_state.get("bench_baseG", 910))))
+            st.session_state["bench_T"] = int(round(day_import.get("temperature_C", st.session_state.get("bench_T", 43))))
+            n_import = min(len(imported_irr), 12)
+            st.session_state["bench_nsub"] = max(1, n_import)
+            for i, value in enumerate(imported_irr[:n_import]):
+                st.session_state[f"bench_s{i}"] = float(value)
+            st.session_state["bench_scen_name"] = f"Day event · {day_import.get('time_label', 'sample')}"
+            st.session_state["bench_import_meta"] = {
+                "source": day_import.get("source", "Explore · The panels · day-event timeline"),
+                "time_label": day_import.get("time_label"),
+                "active_events": list(day_import.get("active_events", [])),
+                "module_source": day_import.get("module_source"),
+            }
+            st.session_state["bench_import_sig"] = (
+                tuple(float(v) for v in imported_irr[:n_import]),
+                int(st.session_state["bench_baseG"]), int(st.session_state["bench_T"]))
+            st.info("Loaded irradiance from the day-event timeline. The Simulator keeps its current datasheet module and applies the imported substring irradiance as a custom scenario.")
+
+        # The sub-tab row is gone: ui.app_header already draws the Sandbox tabs,
+        # and two tab rows that can disagree is one too many.
+
+        # ---- imported-day provenance, and a way to drop it (R5) --------------
+        _imeta = st.session_state.get("bench_import_meta")
+        if _imeta:
+            ic = st.columns([5, 1.3], vertical_alignment="center")
+            ic[0].markdown(
+                f"<div class='gm-sandbox'><b>Imported</b><span>Irradiance from "
+                f"{_e(str(_imeta.get('source', 'the day-event timeline')))}"
+                f"{' at ' + _e(str(_imeta.get('time_label'))) if _imeta.get('time_label') else ''}"
+                f"{' · events: ' + _e(', '.join(_imeta.get('active_events') or [])) if _imeta.get('active_events') else ''}"
+                f". The module is this tab's own datasheet, not the imported one."
+                f"</span></div>", unsafe_allow_html=True)
+            if ic[1].button("Clear import", key="bench_clear_import",
+                            use_container_width=True,
+                            help="Drops the imported-day label. The irradiance values "
+                                 "stay as they are; only the provenance note is removed."):
+                st.session_state.pop("bench_import_meta", None)
+                st.toast("Import label cleared — the numbers are unchanged.")
+                st.rerun()
+
+        # ---- bench-mode banner ----
+        with st.container(border=True):
+            bb = st.columns([0.85, 5, 1.7], vertical_alignment="center")
+            bb[0].markdown(
+                f"<span class='bmono' style='padding:5px 10px;border-radius:999px;"
+                f"background:{c['teal_tint']};color:{c['teal']};font-size:11px;"
+                f"letter-spacing:.06em;text-transform:uppercase'>Interactive simulator</span>",
+                unsafe_allow_html=True)
+            bb[1].markdown(f"<span style='font-size:13.5px;color:{c['text_body']}'>Every number "
+                           f"shown and editable, on a datasheet module you type in yourself. "
+                           f"This is the <b>interactive simplified engine</b>. Explore and Testing use the validated research engine on CEC modules. "
+                           f"The engines remain separate; a day-event import transfers irradiance conditions only.</span>", unsafe_allow_html=True)
+            with bb[2]:
+                st.page_link(P["panels"], label="The panels (validated) →")
+
+        left, mid, right = st.columns([0.92, 1.55, 1.05], gap="medium")
+
+        # ============================================================= LEFT
+        with left:
+            with st.container(border=True):
+                hd = st.columns([3, 1], vertical_alignment="center")
+                hd[0].markdown(_bh("Datasheet"), unsafe_allow_html=True)
+                hd[1].button("Reset", key="bench_reset", on_click=_bench_apply_preset,
+                             use_container_width=True)
+                st.selectbox("Module preset",
+                             list(sim.MODULE_PRESETS) + ["Nanum target module — [AWAITING SPEC]"],
+                             key="bench_preset", on_change=_bench_apply_preset,
+                             label_visibility="collapsed")
+                with st.expander("View module details", expanded=False):
+                    fields = [("Isc", "Isc  A"), ("Voc", "Voc  V"), ("Imp", "Imp  A"),
+                              ("Vmp", "Vmp  V"), ("Ns", "Ns  cells"), ("n", "n  ideality"),
+                              ("alpha_isc", "α_Isc  A/K"), ("beta_voc", "β_Voc  V/K"),
+                              ("Rs", "Rs  Ω"), ("Rsh", "Rsh  Ω")]
+                    for a, b in zip(fields[0::2], fields[1::2]):
+                        g1, g2 = st.columns(2)
+                        for col, (f, lab) in ((g1, a), (g2, b)):
+                            if f == "Ns":
+                                col.number_input(lab, 1, 200, key="bench_Ns", step=1)
+                            else:
+                                col.number_input(lab, key=f"bench_{f}",
+                                                 format="%.4g" if f == "alpha_isc" else "%g")
+                    _dsx = {f: st.session_state[f"bench_{f}"] for f in sim.DS_FIELDS}
+                    _dsx["Ns"] = int(_dsx["Ns"])
+                    warns = sim.validate_datasheet(_dsx, int(st.session_state.bench_nsub))
+                    if warns:
+                        st.markdown(f"<div style='padding:9px 11px;background:{c['amber_tint']};"
+                                    f"border-radius:8px;font-size:12px;line-height:1.45;"
+                                    f"color:{c['amber_text']}'>{' '.join(warns)}</div>",
+                                    unsafe_allow_html=True)
+                    else:
+                        st.markdown(f"<div style='padding:9px 11px;background:{c['amber_tint']};"
+                                    f"border-radius:8px;font-size:12px;line-height:1.45;"
+                                    f"color:{c['amber_text']}'>Checks run as you type: Imp ≤ Isc, "
+                                    f"Vmp ≤ Voc, fill factor under 1, β negative.</div>",
+                                    unsafe_allow_html=True)
+                ds = {f: st.session_state[f"bench_{f}"] for f in sim.DS_FIELDS}
+                ds["Ns"] = int(ds["Ns"])
+
+            with st.container(border=True):
+                st.markdown(_bh("Module configuration"), unsafe_allow_html=True)
+                n_sub = int(st.number_input("substrings (bypass zones)", 1, 12,
+                                            key="bench_nsub", step=1))
+                divides = ds["Ns"] % n_sub == 0
+                if divides:
+                    st.markdown(f"<div class='bmono' style='font-size:12px;color:{c['teal']}'>"
+                                f"{ds['Ns'] // n_sub} cells per substring · divides cleanly ✓"
+                                f"</div>", unsafe_allow_html=True)
+                else:
+                    st.markdown(f"<div class='bmono' style='font-size:12px;color:{c['red']}'>"
+                                f"{ds['Ns']} ÷ {n_sub} does not divide — pick a divisor of "
+                                f"{ds['Ns']}.</div>", unsafe_allow_html=True)
+                st.markdown(f"<div style='font-size:12px;line-height:1.45;color:{c['text_muted']}'>"
+                            f"The cell count must divide by the substring count, so only the "
+                            f"divisors that work are valid. This is what the simulated "
+                            f"curve is computed for.</div>", unsafe_allow_html=True)
+
+            with st.container(border=True):
+                st.markdown(_bh("Array scaling"), unsafe_allow_html=True)
+                a1, a2 = st.columns(2)
+                m_str = int(a1.number_input("modules per string", 1, 40,
+                                            key="bench_mstr", step=1))
+                p_str = int(a2.number_input("parallel strings", 1, 40,
+                                            key="bench_pstr", step=1))
+                st.markdown(f"<div style='font-size:12px;line-height:1.45;"
+                            f"color:{c['text_muted']}'>Array scaling multiplies the reported "
+                            f"array power by {m_str * p_str} modules. It does not change the "
+                            f"P–V curve: this simulator models one module and scales, it "
+                            f"does not solve series/parallel mismatch across an array."
+                            f"</div>", unsafe_allow_html=True)
+
+        for i in range(n_sub):
+            st.session_state.setdefault(f"bench_s{i}", float(st.session_state.bench_baseG))
+
+        # ============================================================= CENTER
+        with mid:
+            with st.container(border=True):
+                ir = st.columns([2.2, 2.8], vertical_alignment="center")
+                ir[0].markdown(_bh("Irradiance per substring") +
+                               f"<span style='font-size:12.5px;color:{c['text_muted']};"
+                               f"margin-left:8px'>type exact values, or drop a shading object "
+                               f"on it</span>", unsafe_allow_html=True)
+                with ir[1]:
+                    st.segmented_control("Shading object",
+                                         ["Pole", "Cloud", "Soiling", "Custom"],
+                                         key="bench_obj", on_change=_bench_obj_change,
+                                         label_visibility="collapsed")
+                # one inline row: S inputs · spacer · base G · T · Run
+                row = st.columns([1] * n_sub + [1.1, 1, 0.9, 2.4],
+                                 vertical_alignment="bottom")
+                sub_irr = []
+                for i in range(n_sub):
+                    v = row[i].number_input(f"S{i+1} W/m²", 0, 1200, key=f"bench_s{i}", step=10)
+                    sub_irr.append(float(v))
+                base_G = int(row[n_sub + 1].number_input("base G", 100, 1200,
+                                                         key="bench_baseG", step=10))
+                T = int(row[n_sub + 2].number_input("T °C", -10, 80, key="bench_T", step=1))
+                with row[n_sub + 3]:
+                    with st.container(key="benchrun"):
+                        run_clicked = st.button("Run simulation", key="bench_run_btn",
+                                                use_container_width=True)
+                # coloured substring bands
+                bw = 104
+                bands = [f"<svg viewBox='0 0 {bw*n_sub} 56' style='width:100%;height:56px;"
+                         f"margin-top:10px'>"]
+                for i, g in enumerate(sub_irr):
+                    t = max(0.0, min(1.0, g / max(base_G, 1)))
+                    col = f"rgb({int(74+160*t)},{int(69+107*t)},{int(53-5*t)})"
+                    bands.append(f"<rect x='{i*bw}' y='6' width='{bw-4}' height='44' fill='{col}'/>")
+                    bands.append(f"<text x='{i*bw+12}' y='34' font-family='IBM Plex Mono,monospace' "
+                                 f"font-size='12' fill='{'#2B2A20' if t>0.5 else '#F0EDE4'}'>"
+                                 f"S{i+1} {int(g)}</text>")
+                bands.append("</svg>")
+                st.markdown("".join(bands), unsafe_allow_html=True)
+
+            # The Run button owns the simulation. `bench_ran` holds the inputs of the
+            # last run, and everything below is drawn from those — never from inputs
+            # the user has changed but not yet run.
+            ds_key = tuple(sorted(ds.items()))
+            # base_G and the array scaling are part of the signature because the saved
+            # record and the "array (scaled)" KPI quote them: a record must never mix
+            # the inputs that were run with ones changed afterwards. (R6)
+            cur_sig = (ds_key, int(T), tuple(float(x) for x in sub_irr), int(n_sub),
+                       int(base_G), int(m_str), int(p_str))
+            # The import label describes a set of irradiance values. Once any of
+            # them (or the conditions) are edited by hand it no longer describes
+            # what is on screen, so it goes. (R5)
+            _imported_sig = st.session_state.get("bench_import_sig")
+            _irr_sig = (tuple(float(x) for x in sub_irr), int(base_G), int(T))
+            if st.session_state.get("bench_import_meta"):
+                if _imported_sig is None:
+                    st.session_state["bench_import_sig"] = _irr_sig
+                elif _imported_sig != _irr_sig:
+                    st.session_state.pop("bench_import_meta", None)
+                    st.session_state.pop("bench_import_sig", None)
+            if run_clicked and divides:
+                st.session_state["bench_ran"] = cur_sig
+            ran = st.session_state.get("bench_ran")
+
+            if not divides:
+                with st.container(border=True):
+                    ui.callout("Fix the module configuration (cell count must divide by "
+                               "the substring count) and run again.", "Topology error", "limit")
+                res = None
+            elif ran is None:
+                with st.container(border=True):
+                    ui.callout("Set the datasheet, module configuration and irradiance, "
+                               "then press “Run simulation” to compute the curve.",
+                               "No result yet", "info")
+                res = None
+            else:
+                r_ds_key, r_T, r_sub, r_nsub, r_baseG, r_mstr, r_pstr = ran
+                r_ds = dict(r_ds_key); r_ds["Ns"] = int(r_ds["Ns"])
+                res = _bench_sim(r_ds_key, r_T, r_sub)
+                if ran != cur_sig:
+                    ui.callout("The inputs above have changed since this result was "
+                               "computed. Press “Run simulation” to update it.",
+                               "Showing the last run", "caveat")
+                with st.container(border=True):
+                    tabs = st.tabs(["I–V / P–V", "Substrings", "Peaks", "Cell map",
+                                    "Parametric sweep"])
+                    with tabs[0]:
+                        st.caption("800-point current grid · 256-point export")
+                        Vm, Im, Pm = res["gmpp"]
+                        fig = go.Figure()
+                        fig.add_trace(go.Scatter(x=res["V"], y=res["I"], name="I–V",
+                                                 line=dict(color="#2C7FA0", width=2.5)))
+                        fig.add_trace(go.Scatter(x=res["V"], y=res["P"], name="P–V", yaxis="y2",
+                                                 line=dict(color=c["amber"], width=2.5)))
+                        fig.add_trace(go.Scatter(x=[Vm], y=[Pm], mode="markers+text", name="GMPP",
+                                                 yaxis="y2", text=["GMPP"], textposition="top center",
+                                                 marker=dict(color=c["amber"], size=11)))
+                        if res["lmpps"]:
+                            fig.add_trace(go.Scatter(
+                                x=[v for v, i, p in res["lmpps"]],
+                                y=[p for v, i, p in res["lmpps"]], mode="markers", name="LMPP",
+                                yaxis="y2", marker=dict(color="rgba(0,0,0,0)", size=10,
+                                                        line=dict(color="#8A9098", width=2))))
+                        ui.style_fig(fig, height=330, x_title="terminal voltage  V")
+                        fig.update_layout(yaxis=dict(title="I  A"),
+                                          yaxis2=dict(title="P  W", overlaying="y", side="right",
+                                                      showgrid=False))
+                        ui.show_chart(fig)
+
+                        e = st.columns(5)
+                        if e[0].button("Freeze this curve", key="bench_freeze",
+                                       use_container_width=True,
+                                       help="Save it to Saved scenarios for comparison"):
+                            _bench_save(_bench_label(), r_ds, r_nsub, r_mstr, r_pstr,
+                                        r_baseG, r_T, r_sub, res)
+                            st.toast("Saved to Saved scenarios.")
+                        csv = "V,I,P\n" + "\n".join(
+                            f"{v:.5g},{i:.5g},{p:.5g}"
+                            for v, i, p in zip(res["V"], res["I"], res["P"]))
+                        e[1].download_button("Curve CSV", csv, "curve.csv", "text/csv",
+                                             use_container_width=True)
+                        import json
+                        cfg = json.dumps(dict(datasheet=r_ds, module_configuration=dict(
+                            substrings=r_nsub), array_scaling=dict(
+                            modules_per_string=m_str, parallel_strings=p_str),
+                            sub_irradiance=list(r_sub), base_G=base_G, T_C=r_T,
+                            engine="interactive simulator — single-diode + per-substring "
+                                   "bypass (not the validated engine)"), indent=2)
+                        e[2].download_button("Config JSON", cfg, "config.json",
+                                             "application/json", use_container_width=True)
+                        try:
+                            import io
+                            from scipy.io import savemat
+                            buf = io.BytesIO()
+                            savemat(buf, {"V": np.asarray(res["V"]), "I": np.asarray(res["I"]),
+                                          "P": np.asarray(res["P"]),
+                                          "gmpp": np.asarray(res["gmpp"], float)})
+                            e[3].download_button(".mat", buf.getvalue(), "curve.mat",
+                                                 use_container_width=True)
+                        except Exception:
+                            e[3].button(".mat", disabled=True, use_container_width=True,
+                                        help="scipy not available")
+                        # No "Figure SVG" button: server-side SVG export needs kaleido
+                        # and a browser this deployment does not have, and a control
+                        # that can never be enabled is furniture. It is named once in
+                        # the roadmap note under the table instead.
+                        e[4].caption("SVG export — roadmap")
+
+                    with tabs[1]:
+                        rows = [{"Substring": f"S{i+1}", "Irradiance (W/m²)": int(g),
+                                 "Bypass at GMPP": "active" if res["bypassed"][i] else "off"}
+                                for i, g in enumerate(r_sub)]
+                        st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
+                        ui.legend_note("A substring is bypassed when the GMPP current exceeds "
+                                       "its own short-circuit current.")
+
+                    with tabs[2]:
+                        peaks = [("GMPP",) + tuple(res["gmpp"])] + \
+                                [(f"LMPP {i+1}",) + tuple(pk) for i, pk in enumerate(res["lmpps"])]
+                        st.dataframe(pd.DataFrame(
+                            [{"Peak": nm, "V": round(v, 2), "I": round(i, 2), "P (W)": round(p, 1)}
+                             for nm, v, i, p in peaks]), hide_index=True, width="stretch")
+
+                    with tabs[3]:
+                        grid = sim.build_cell_grid(list(r_sub), r_ds["Ns"] // r_nsub)
+                        hm = go.Figure(go.Heatmap(z=grid, colorscale="YlOrBr", showscale=True,
+                                                  colorbar=dict(title="W/m²")))
+                        ui.style_fig(hm, height=300)
+                        hm.update_yaxes(autorange="reversed")
+                        ui.show_chart(hm)
+                        ui.legend_note("Each substring is a row band (this engine holds one "
+                                       "irradiance per strip).")
+
+                    with tabs[4]:
+                        # app.render_sweep() exists and works; this tab showed a
+                        # not_built placeholder beside it. (N6)
+                        st.caption("Sweeps the modules in `MODULE_PRESETS` across a "
+                                   "temperature × irradiance matrix. It does NOT read the "
+                                   "datasheet you typed on the left — it has its own "
+                                   "module picker below.")
+                        sim.render_sweep()
+
+        # ============================================================= RIGHT
+        with right:
+            if res is not None:
+                Vm, Im, Pm = res["gmpp"]
+                Voc, Isc = res["Voc"], res["Isc"]
+                ff = Pm / (Voc * Isc) if Voc * Isc > 0 else 0.0
+                allkw = Pm * r_mstr * r_pstr / 1000.0
+                with st.container(border=True):
+                    st.markdown(_bh("Result"), unsafe_allow_html=True)
+                    grid_items = [("Pmax", f"{Pm:.1f} W"), ("Vmpp", f"{Vm:.1f} V"),
+                                  ("Impp", f"{Im:.2f} A"), ("Voc", f"{Voc:.1f} V"),
+                                  ("Isc", f"{Isc:.2f} A"), ("fill factor", f"{ff:.2f}"),
+                                  ("local peaks", str(len(res["lmpps"]))),
+                                  ("array (scaled)", f"{allkw:.2f} kW")]
+                    cells = "".join(
+                        f"<span style='color:{c['text_muted']}'>{k}</span>"
+                        f"<span style='font-weight:500;color:{c['text']}'>{v}</span>"
+                        for k, v in grid_items)
+                    st.markdown(f"<div class='bmono' style='margin-top:10px;display:grid;"
+                                f"grid-template-columns:repeat(2,minmax(0,1fr));gap:8px 12px;"
+                                f"font-size:13px'>{cells}</div>", unsafe_allow_html=True)
+                    chips = "".join(
+                        f"<span style='padding:4px 9px;border-radius:6px;"
+                        f"background:{c['amber_tint'] if res['bypassed'][i] else c['muted_fill']};"
+                        f"color:{c['amber_text'] if res['bypassed'][i] else c['text']}'>"
+                        f"D{i+1} {'active' if res['bypassed'][i] else 'off'}</span>"
+                        for i in range(r_nsub))
+                    st.markdown(f"<div class='bmono' style='margin-top:10px;padding-top:10px;"
+                                f"border-top:1px solid {c['border']};display:flex;gap:8px;"
+                                f"flex-wrap:wrap;font-size:12.5px'>{chips}</div>",
+                                unsafe_allow_html=True)
+                    st.markdown(f"<div style='margin-top:10px;font-size:12px;line-height:1.45;"
+                                f"color:{c['text_muted']}'>Pmax, Vmpp, Impp, Voc and Isc are "
+                                f"for one module. <b>Array (scaled)</b> is that module power "
+                                f"multiplied by {m_str} modules × {p_str} strings — "
+                                f"array scaling does not change the curve.</div>",
+                                unsafe_allow_html=True)
+
+                with st.container(border=True):
+                    st.markdown(_bh("What happened"), unsafe_allow_html=True)
+                    st.markdown(f"<p style='margin:8px 0 0 0;font-size:13px;line-height:1.55;"
+                                f"color:{c['text_body']}'>{sim.what_happened(res, list(r_sub))}</p>",
+                                unsafe_allow_html=True)
+                    st.markdown(f"<div class='bmono' style='margin-top:8px;font-size:11px;"
+                                f"color:{c['text_faint']}'>written from the result state, "
+                                f"not a stored template</div>", unsafe_allow_html=True)
+
+                with st.container(border=True):
+                    st.markdown(_bh("Do something with it"), unsafe_allow_html=True)
+                    st.text_input("Scenario name", key="bench_scen_name",
+                                  placeholder="e.g. 60-cell · pole at noon")
+                    with st.container(key="next-benchsend"):
+                        if st.button("Save to Saved scenarios", key="bench_save",
+                                     type="primary", use_container_width=True):
+                            _bench_save(_bench_label(), r_ds, r_nsub, r_mstr, r_pstr,
+                                        r_baseG, r_T, r_sub, res)
+                            st.switch_page(P["sim_saved"])
+                    if st.button("Use this module for a dataset", key="bench_to_dataset",
+                                 use_container_width=True,
+                                 help="Copies this datasheet, substring count and "
+                                      "conditions into Make a dataset"):
+                        _bench_to_dataset(r_ds, r_nsub, r_mstr, r_pstr, r_baseG, r_T)
+                        st.switch_page(P["sim_dataset"])
+                    st.page_link(P["sim_saved"], label="Saved scenarios")
+                    # The trackers run the validated engine on a CEC module; this bench
+                    # runs the interactive engine on a datasheet. Say so rather than
+                    # offering a "send" that cannot carry anything across.
+                    st.markdown(
+                        f"<div style='margin-top:10px;padding-top:10px;border-top:1px solid "
+                        f"{c['border']};font-size:12px;line-height:1.5;color:{c['text_muted']}'>"
+                        f"Scenarios for the trackers come from <b>Explore · The panels</b>, "
+                        f"which runs the validated engine on a CEC module. A bench curve "
+                        f"cannot be sent there — the two engines take different module "
+                        f"definitions.</div>", unsafe_allow_html=True)
+                    st.page_link(P["panels"], label="Build a scenario for the trackers →")
+
+            # engine badge — the exact red "which model drew this" card
+            st.markdown(
+                "<div style='background:#FBEFEE;border:1px solid #E0A9A4;border-radius:14px;"
+                "padding:14px 18px'>"
+                "<div style='font-size:11.5px;font-weight:600;letter-spacing:.05em;"
+                "text-transform:uppercase;color:#7A2019'>Interactive simulator — not the "
+                "validated engine</div>"
+                "<p style='margin:7px 0 0 0;font-size:12.5px;line-height:1.5;color:#2B3238'>"
+                "This tab is for exploratory configuration and visualisation. The "
+                "benchmark figures under Testing come from the validated engine.</p>"
+                "<div class='bmono' style='margin-top:8px;display:flex;flex-direction:column;"
+                "gap:5px;font-size:11.5px;color:#2B3238'>"
+                "<span>engine: single-diode + per-substring bypass (simplified)</span>"
+                "<span>reverse-bias avalanche: not modelled</span>"
+                "<span>shading detail: one value per strip</span>"
+                "<span style='color:#7A2019'>part-of-a-strip shading: this engine cannot show "
+                "it</span></div>"
+                "<p style='margin:8px 0 0 0;font-size:12.5px;line-height:1.5;color:#2B3238'>"
+                "Every page states which engine drew its curve. Nothing from this tab may be "
+                "quoted as a benchmark result unless it was produced by the validated engine."
+                "</p></div>", unsafe_allow_html=True)
+
+
+def page_sim_saved():
+    ui.page_intro("Saved scenarios",
+                  "Load a saved scenario back onto Set up a panel, or compare the ones "
+                  "you have kept.", "Simulator")
+    saved = st.session_state.get("frozen") or []
+    if not saved:
+        ui.callout("Nothing saved yet. On Set up a panel, run a simulation and press "
+                   "“Freeze this curve” or “Save to Saved scenarios”.",
+                   "No saved scenarios", "info")
+        st.page_link(P["sim_setup"], label="Go to Set up a panel →")
+        return
+
+    with st.container(border=True):
+        st.markdown(_bh("Load a scenario"), unsafe_allow_html=True)
+        idx = list(range(len(saved) - 1, -1, -1))          # newest first
+        pick = st.selectbox("Scenario", idx, key="saved_pick",
+                            format_func=lambda i: f"{saved[i]['label']}  ·  "
+                                                  f"{saved[i]['gmpp'][2]:.1f} W")
+        rec = saved[pick]
+        loadable = bool((rec.get("config") or {}).get("bench"))
+        bc = st.columns([1.4, 1.4, 4])
+        if bc[0].button("Load onto Set up a panel", key="saved_load", type="primary",
+                        disabled=not loadable, use_container_width=True,
+                        help=None if loadable else
+                        "This scenario was saved without the Set-up-a-panel controls, "
+                        "so it can be compared but not reloaded."):
+            if _bench_load(rec):
+                st.switch_page(P["sim_setup"])
+        if bc[1].button("Delete this scenario", key="saved_del", use_container_width=True):
+            st.session_state.frozen = [f for k, f in enumerate(saved) if k != pick]
+            st.session_state.pop("saved_pick", None)
+            st.rerun()
+        if loadable:
+            b = rec["config"]["bench"]
+            st.caption(f"Restores: {b['preset']} · {b['nsub']} substrings · "
+                       f"{[int(g) for g in b['sub_irr']]} W/m² · {b['T']} °C · "
+                       f"{b['mstr']}×{b['pstr']} array scaling.")
+        with st.expander("Full configuration", expanded=False):
+            st.json(rec.get("config", {}), expanded=False)
+
+    sim.render_scenarios_section()
+
+
+def page_sim_dataset():
+    ui.page_intro("Make a dataset",
+                  "Generate thousands of scenarios with a fixed seed and download them.",
+                  "Simulator")
+    _dsheet = sim.current_ds()
+    st.caption(f"Generating from: {st.session_state.get('ds_name', '—')} · "
+               f"{_dsheet['Ns']} cells · {st.session_state.get('topo_nsub', '—')} substrings. "
+               f"Use “Use this module for a dataset” on Set up a panel to change it.")
+    sim.render_dataset_section()
+    ui.callout("These scenarios are produced by the interactive simulator, not by the "
+               "validated engine behind the Testing benchmarks.",
+               "Which engine made this dataset", "caveat")
+
+
+# =========================================================================== #
+# Testing
+# =========================================================================== #
+# =========================================================================== #
+# Testing · Watch one run  — real trackers on a real curve (device.py), and the
+# trained C3 learned seed. No numbers are typed in; everything is computed.
+# =========================================================================== #
+# --------------------------------------------------------------------------- #
+# One label table for every method variant (§7.1). The bare word "Hybrid" is
+# never shown: hybrid.py builds four different functions and the exports carry
+# five different hybrid keys, and they do not score the same.
+# --------------------------------------------------------------------------- #
+_METHOD_LABELS = {
+    "hybrid, bounded": "Hybrid (bounded)",
+    "hybrid, free": "Hybrid (free)",
+    "hybrid_bounded": "Hybrid (bounded)",
+    "hybrid_free": "Hybrid (free)",
+    "hybrid, no reseed": "Hybrid (no reseed)",
+    "hybrid, never reseed": "Hybrid (never reseed)",
+    "hybrid, triggered reseed": "Hybrid (triggered reseed)",
+    "hybrid, reseed each block": "Hybrid (reseed each block)",
+    "seed only": "Model only",
+    "seed only, no reseed": "Model only (no reseed)",
+    "PSO, triggered reseed": "PSO (triggered reseed)",
+    "oracle [not buildable]": "Oracle (not buildable)",
+    "P&O": "P&O", "InC": "InC", "PSO": "PSO",
+}
+
+
+def method_label(key: str) -> str:
+    return _METHOD_LABELS.get(str(key), str(key))
+
+
+_RUN_METHODS = ["P&O", "InC", "PSO", "Model only", "Hybrid (bounded)", "Perfect tracker"]
+
+# Readings per cycle. Populated from gmppt.hybrid.SEED_PROBE_COST and from the
+# exports — never typed in here, so one method cannot show two numbers on two
+# pages. PROBE_FRACTIONS has five entries, so SEED_PROBE_COST is 5; the old
+# table hardcoded 6 (and the method report still says six — see D5).
+_READINGS_FIXED = {
+    "Hybrid": SEED_PROBE_COST,
+    "Model only": SEED_PROBE_COST,
+    # P&O and InC take one sample per control step; the exports carry no separate
+    # probe budget for them, so the honest entry is "not separately reported".
+    "P&O": None, "InC": None, "Perfect tracker": None,
+}
+
+
+def _pso_readings(pso_export: dict | None) -> tuple[int | None, dict | None]:
+    """PSO evaluations per cycle, and the sweep row they came from.
+
+    p9 writes `sequential_steps` = population × iterations, i.e. the number of
+    particle EVALUATIONS a single converter must take one after another. That is
+    the readings figure. `*_median_conv_steps` is the separate convergence
+    figure and must not be reused as a cost. (D6)
+    """
+    if not pso_export or not pso_export.get("pso_sweep"):
+        return None, None
+    best = max(pso_export["pso_sweep"], key=lambda e: e.get("all_reached_pct", 0))
+    val = best.get("sequential_steps")
+    return (int(val) if val is not None else None), best
+
+
+@st.cache_data(show_spinner=False)
+def _demo_module() -> tuple[str, str]:
+    """A VALIDATION module for the built-in demo scenarios, plus a note.
+
+    The previous literal (LG_Electronics_Inc__LG375N2K_G4) is a TRAINING module —
+    one the model was fitted on — so a demo built on it could not illustrate a
+    reportable result. Resolved against the same set p7 --split val uses.
+    """
+    previous = "LG_Electronics_Inc__LG375N2K_G4"
+    if _in_val(previous):
+        return previous, ""
+    pool = _pool()
+    names = [n for n in _val_module_names() if n in pool.index]
+    h = pool.loc[names].copy()
+    h["P"] = h["V_mp_ref"] * h["I_mp_ref"]
+    s = h[h["N_s"] == 72].sort_values("P")
+    if not len(s):
+        s = h.sort_values("P")
+    pick = str(s.index[len(s) // 2])
+    return pick, (f"The previous demo module ({previous}) is a TRAINING module, so it "
+                  f"was replaced with the median-power 72-cell validation module "
+                  f"({pick}).")
+
+
+def _run_demo() -> dict:
+    return dict(module=_demo_module()[0], temp=43.0, irr=(910.0, 300.0, 600.0))
+
+
+@st.cache_resource(show_spinner=False)
+def _c3_model():
+    """Load the trained two-stage seed. None if sklearn / the .pkl is missing."""
+    try:
+        from gmppt.model import TwoStageModel
+        return TwoStageModel.load("c3_two_stage_full")
+    except Exception:
+        return None
+
+
+def _score_traj(t):
+    """Scores come from the harness's own Trajectory.metrics() — the same code
+    p7_tracker_comparison.py summarises into the exports this app reads.
+
+    The dashboard used to carry its own copy with two defects. It measured
+    convergence against the method's OWN final power rather than the GMPP, so a
+    tracker that settled firmly on the wrong peak scored as converged; and it
+    reported steps = 0 when the final sample was outside the band, i.e. it
+    printed "instant" for "never settled". Delegating removes both, and removes
+    the possibility of this page and the Compare page disagreeing. (R15)
+    """
+    import numpy as np
+    from gmppt.tracking import STEADY_FRACTION
+    m = t.metrics()
+    p = np.asarray(t.p_hist, float)
+    k = max(1, int(round(STEADY_FRACTION * len(p))))
+    lost = max(0.0, float(t.p_gmpp) - float(p[-k:].mean()))
+    return dict(reached=bool(m["reached_gmpp"]),
+                steps=m["convergence_steps"],        # None = never settled
+                lost=float(lost),
+                steady_eff_pct=float(m["steady_efficiency_pct"]),
+                v_hist=[float(x) for x in t.v_hist],
+                p_hist=[float(x) for x in t.p_hist])
+
+
+@st.cache_data(show_spinner=True)
+def _run_scenario(module, temp, irr_key):
+    import numpy as np
+    from gmppt import tracking as trk, trackers as trkx, pso as pso
+    from gmppt.scenarios import Scenario
+    irr = [list(e) if isinstance(e, tuple) else float(e) for e in irr_key]
+    sc = Scenario(module, float(temp), geometry_of(irr), irr, False)
+    base = trk.trajectory_for(sc)
+    out = dict(V=[float(x) for x in base.V], P=[float(x) for x in base.P],
+               v_oc=float(base.v_oc), v_gmpp=float(base.v_gmpp),
+               p_gmpp=float(base.p_gmpp), n_peaks=int(base.n_peaks), methods={})
+
+    def run(name, fn, **kw):
+        t = trk.trajectory_for(sc); fn(t, **kw); out["methods"][name] = _score_traj(t)
+
+    run("P&O", trk.perturb_and_observe)
+    run("InC", trkx.incremental_conductance)
+    run("PSO", pso.particle_swarm)
+    run("Perfect tracker", trk.parked_at_gmpp)
+
+    model = _c3_model()
+    out["has_model"] = model is not None
+    out["seed"] = None
+    if model is not None:
+        from gmppt import hybrid as hyb
+        from gmppt.features import extract_features, PROBE_FRACTIONS
+        ts = trk.trajectory_for(sc)
+        v_seed, region = hyb.seed_voltage(ts, model, float(temp))
+        xs = extract_features(trk.trajectory_for(sc).step, base.v_oc,
+                              module, float(temp)).reshape(1, -1)
+        proba = [float(p) for p in model.classifier.predict_proba(xs)[0]]
+        out["seed"] = dict(v_seed=float(v_seed), region=int(region), proba=proba,
+                           probes=[float(f) * base.v_oc for f in PROBE_FRACTIONS],
+                           n_probes=len(PROBE_FRACTIONS))
+        run("Model only", hyb.make_seed_only(model), temp_c=float(temp))
+        # Both variants, because hybrid.py builds both and they answer different
+        # questions. Bounded is the code default and the headline (D4); free is
+        # shown beside it because the docstring argues the clamp never binds.
+        bounded = hyb.make_hybrid(model)
+        free = hyb.make_hybrid(model, bounded=False)
+        out["variant_names"] = {"bounded": bounded.__name__, "free": free.__name__}
+        run("Hybrid (bounded)", bounded, temp_c=float(temp))
+        run("Hybrid (free)", free, temp_c=float(temp))
+        # Did the free variant ever leave the predicted region? That is the
+        # measurement hybrid.py settles the bounded/free question with.
+        w = base.v_oc / _gcfg.N_SUBSTRINGS
+        lo, hi = region * w, (region + 1) * w
+        vh = out["methods"]["Hybrid (free)"]["v_hist"]
+        out["free_left_region"] = bool(any(v < lo - 1e-9 or v > hi + 1e-9 for v in vh))
+    return out
+
+
+def page_run():
+    import numpy as np
+    c = ui.T()
+    disp, mono = ui.FONTS["display"], ui.FONTS["mono"]
+    st.markdown(f"<style>.bh{{font-family:{disp};font-weight:700;color:{c['text']};}}"
+                f".bmono,.bmono *{{font-family:{mono};}}"
+                f"div.st-key-runtabs a{{padding:10px 14px;font-size:14px;"
+                f"color:{c['text_body']}!important;text-decoration:none;}}"
+                f"div.st-key-runtabs a p{{margin:0;}}"
+                f"div.st-key-seeall a{{height:44px;display:flex;align-items:center;"
+                f"justify-content:center;border-radius:8px;background:{c['teal']};"
+                f"color:#fff!important;font-weight:600;text-decoration:none;}}"
+                f"div.st-key-seeall a p{{margin:0;color:#fff!important;}}"
+                f"</style>", unsafe_allow_html=True)
+
+    _sc = st.session_state.get("scenario_sent")
+    if _sc:
+        _irrkey = _key(_sc["irr"])
+        d = _run_scenario(_sc["module"], _sc["temp"], _irrkey)
+        _resend_notice()
+        if st.button("Discard sent scenario", key="run_use_example",
+                     help="Drops the scenario Explore sent and returns this page to the "
+                          "built-in example. Nothing on Explore is changed."):
+            st.session_state.pop("scenario_sent", None)
+            st.toast("Sent scenario discarded — showing the example again.")
+            st.rerun()
+    else:
+        _demo = _run_demo()
+        d = _run_scenario(_demo["module"], _demo["temp"], _demo["irr"])
+        note = _demo_module()[1]
+        ui.callout(
+            f"No scenario has been sent from Explore, so this is the built-in example: "
+            f"a validation module ({_demo['module']}) under a three-region shadow. "
+            f"{note + ' ' if note else ''}"
+            f"Build your own on Explore · The panels and press “Send this panel to "
+            f"the trackers”.",
+            "Showing the example scenario", "info")
+        st.page_link(P["panels"], label="Build your own scenario →")
+    avail = [m for m in _RUN_METHODS + ["Hybrid (free)"] if m in d["methods"]]
+
+    # ---- overlay chooser ----
+    oc = st.columns([0.7, 6], vertical_alignment="center")
+    oc[0].markdown(f"<span style='font-size:12px;font-weight:600;letter-spacing:.05em;"
+                   f"text-transform:uppercase;color:{c['text_muted']}'>Overlay</span>",
+                   unsafe_allow_html=True)
+    default = [m for m in ("P&O", "Hybrid (bounded)") if m in avail] or avail[:1]
+    sel = oc[1].segmented_control("overlay", avail, selection_mode="multi",
+                                  default=default, key="run_overlay",
+                                  label_visibility="collapsed") or default
+
+    left, right = st.columns([1.55, 0.95], gap="large")
+
+    # ============================================================= main chart
+    with left:
+        with st.container(border=True):
+            st.markdown(_bh_run("What each method does on this curve") +
+                        f"<span style='font-size:13px;color:{c['text_muted']};"
+                        f"margin-left:10px'>where each method starts, what it measures, "
+                        f"where it stops</span>", unsafe_allow_html=True)
+            V, Pw = np.array(d["V"]), np.array(d["P"])
+            fig = go.Figure()
+            seed = d["seed"]
+            show_seed = seed and any(m.startswith(("Hybrid", "Model only")) for m in sel)
+            if show_seed:
+                r = seed["region"]
+                # The substring windows the seed chooses between, drawn by the
+                # design system so every page splits V_oc the same way.
+                ui.add_strip_bands(fig, d["v_oc"], _gcfg.N_SUBSTRINGS, highlight=r)
+                _bounded_shown = any(m == "Hybrid (bounded)" for m in sel)
+                fig.add_annotation(
+                    x=(r + 0.5) * d["v_oc"] / _gcfg.N_SUBSTRINGS, y=max(d["P"]),
+                    text=("Bounded P&O cannot leave this window" if _bounded_shown
+                          else "Seed's predicted region (start only)"),
+                    showarrow=False, yshift=14, font=dict(size=11, color=c["teal"]))
+            fig.add_trace(go.Scatter(x=V, y=Pw, name="P–V",
+                                     line=dict(color=c["teal"], width=2.5)))
+            fig.add_trace(go.Scatter(x=[d["v_gmpp"]], y=[d["p_gmpp"]], mode="markers",
+                                     name="GMPP", marker=dict(symbol="star", size=15,
+                                     color="#F5B301", line=dict(color="#1c1300", width=.6))))
+            if show_seed:
+                px = seed["probes"]
+                py = [float(np.interp(v, V, Pw)) for v in px]
+                fig.add_trace(go.Scatter(x=px, y=py, mode="markers+text",
+                              text=[f"p{i+1}" for i in range(len(px))],
+                              textposition="bottom center",
+                              name=f"{SEED_PROBE_COST} readings",
+                              marker=dict(color=c["teal"], size=7),
+                              textfont=dict(size=9, color=c["teal"])))
+            for m in sel:
+                r = d["methods"].get(m)
+                if not r:
+                    continue
+                vh, ph = np.array(r["v_hist"]), np.array(r["p_hist"])
+                style = ui.method_style(m); col = style["color"]
+                if m in ("P&O", "InC"):
+                    fig.add_trace(go.Scatter(x=vh[::6], y=ph[::6], mode="lines",
+                                  line=dict(color=col, width=1.4, dash="dot"),
+                                  name=m, opacity=0.7))
+                    fig.add_trace(go.Scatter(x=[vh[0]], y=[ph[0]], mode="markers",
+                                  marker=dict(color=col, size=8, symbol="circle-open",
+                                  line=dict(width=2)), showlegend=False))
+                fig.add_trace(go.Scatter(x=[vh[-1]], y=[ph[-1]], mode="markers",
+                              marker=dict(color=col, size=12), name=m,
+                              showlegend=m not in ("P&O", "InC")))
+                if not r["reached"]:
+                    lab = "stops · %.0f W · −%.1f W" % (ph[-1], r["lost"])
+                elif r["steps"] is None:
+                    lab = "reaches, never settles"
+                else:
+                    lab = "settles · %d steps" % r["steps"]
+                fig.add_annotation(x=vh[-1], y=ph[-1], text=lab, showarrow=True,
+                                   arrowhead=0, ax=0, ay=-24, font=dict(size=10, color=col))
+            ui.style_fig(fig, height=400, x_title="terminal voltage  V",
+                         y_title="power  W")
+            fig.update_layout(legend=dict(orientation="h", y=1.06, x=0))
+            ui.show_chart(fig, key="run_pv")
+            # Only worth saying when P&O actually failed here. On a curve it wins,
+            # the sentence reads as an excuse for a failure that did not happen.
+            _po = d["methods"].get("P&O")
+            if _po and not _po["reached"]:
+                ui.callout("P&O is not defective: on this scenario it is trapped on a local "
+                           "peak, and on single-peak curves it reaches the maximum. The "
+                           "failure mode being shown is trapping.", "Control", "info")
+
+    # ============================================================= right aside
+    with right:
+        with st.container(border=True):
+            st.markdown(_bh_run("How the model picks a starting point", 15),
+                        unsafe_allow_html=True)
+            if seed:
+                pr = seed["proba"]
+                r = seed["region"]
+                bars = ""
+                for i, pv in enumerate(pr):
+                    fill = c["teal"] if i == r else c["text_muted"]
+                    bars += (f"<div style='display:flex;align-items:center;gap:8px;"
+                             f"font-family:{mono};font-size:12px'><span style='width:26px'>"
+                             f"S{i+1}</span><span style='flex-grow:1;height:8px;"
+                             f"background:{c['muted_fill']};border-radius:4px'>"
+                             f"<span style='display:block;width:{pv*100:.0f}%;height:8px;"
+                             f"background:{fill};border-radius:4px'></span></span>"
+                             f"<span>{pv:.2f}</span></div>")
+                # Four steps, not five. The old step 5 described the A2 fallback in
+                # gmppt/fallback.py, which make_hybrid does not call and this page
+                # never runs — so it claimed a safety net that is not in the loop. (N1/D3)
+                st.markdown(
+                    f"<div style='margin-top:8px;font-size:13px;line-height:1.5;"
+                    f"color:{c['text_body']}'><b>1 · Take {SEED_PROBE_COST} readings</b> "
+                    f"at fixed voltages across the curve — each costs a little output.<br>"
+                    f"<b>2 · Pick a substring</b> — the model chooses which cell strip "
+                    f"holds the tallest peak, instead of guessing a voltage.</div>"
+                    f"<div style='margin-top:8px;padding:10px 12px;background:"
+                    f"{c['muted_fill']};border-radius:8px'>{bars}</div>"
+                    f"<div style='margin-top:8px;font-size:13px;line-height:1.5;"
+                    f"color:{c['text_body']}'><b>3 · Place the start</b> inside strip "
+                    f"S{r+1}, at {seed['v_seed']:.1f} V.<br>"
+                    f"<b>4 · Hand to P&amp;O</b> — the ordinary hill-climber, unchanged; "
+                    f"it just starts in the right place.</div>"
+                    f"<div style='margin-top:8px;font-size:12px;line-height:1.45;"
+                    f"color:{c['text_muted']}'>The bounded variant additionally clamps "
+                    f"P&amp;O inside strip S{r+1}. A confidence-triggered backup scan "
+                    f"exists in <code>gmppt/fallback.py</code> but is not part of either "
+                    f"variant and is not running here.</div>", unsafe_allow_html=True)
+                if d.get("free_left_region") is False:
+                    st.caption("Measured on this scenario: the free variant never left "
+                               "the predicted region, so the clamp could not have bound.")
+            else:
+                ui.callout("The learned seed needs the trained model "
+                           "(`results/phase3/c3_two_stage.pkl`) and scikit-learn. The "
+                           "classical trackers below are running on real data.",
+                           "Learned seed unavailable", "limit")
+
+        with st.container(border=True):
+            st.markdown(_bh_run("This scenario, side by side", 15), unsafe_allow_html=True)
+            order = [m for m in ("Hybrid (bounded)", "Hybrid (free)", "Model only",
+                                 "PSO", "P&O", "InC") if m in d["methods"]]
+            pso_reads, _ = _pso_readings(_load_json("phase2/pso_comparison_val.json"))
+            head = "".join(f"<span style='color:{c['text_muted']}'>{h}</span>"
+                           for h in ("", "found it", "steps", "readings", "lost"))
+            rowshtml = ""
+            for m in order:
+                r = d["methods"][m]
+                found = ("<span style='color:%s'>yes</span>" % c["teal"]) if r["reached"] \
+                    else ("<span style='color:%s'>no</span>" % c["red"])
+                # Convergence is conditional on arrival: a method that never
+                # reached the GMPP has no step count, and printing one would
+                # invite reading it as a speed.
+                steps = "—" if (not r["reached"] or r["steps"] is None) \
+                    else f"{int(r['steps'])}"
+                reads = pso_reads if m == "PSO" else _READINGS_FIXED.get(
+                    m.split(" (")[0], None)
+                rowshtml += (f"<span style='font-weight:500'>{_e(m)}</span>{found}"
+                             f"<span>{steps}</span><span>{_fmt(reads, '{:.0f}')}</span>"
+                             f"<span>{r['lost']:.1f} W</span>")
+            st.markdown(f"<div class='bmono' style='margin-top:8px;display:grid;"
+                        f"grid-template-columns:1.5fr .7fr .6fr .8fr .8fr;gap:6px 8px;"
+                        f"font-size:12px'>{head}{rowshtml}</div>", unsafe_allow_html=True)
+            ui.legend_note("Steps are conditional on arrival — a dash means the method "
+                           "never reached the global peak, not that it was instant. "
+                           "Readings for P&O and InC are not separately reported by the "
+                           "exports.")
+            with st.container(key="seeall"):
+                st.page_link(P["compare"],
+                             label="One scenario proves nothing — see the whole set →")
+
+        with st.container(key="seereloc"):
+            st.page_link(P["relocation"],
+                         label="What happens when the peak jumps to another strip \u2192")
+
+
+def _bh_run(title, size=17):
+    return f"<span class='bh' style='font-size:{size}px'>{title}</span>"
+
+
+# Snapshot from the validation report (p7 static n=632, p9 convergence). Replace with the
+# harness export once --emit exists; never compute these numbers inside the dashboard.
+_SNAPSHOT = pd.DataFrame([
+    ("Hybrid", 99.88, 98.6, 5, 6, 6.4),
+    ("PSO", 99.9, 97.8, 62, 120, None),
+    ("Model only", 99.76, 94.5, 0, 6, 6.3),
+    ("P&O", 79.51, 46.2, 18, 3, 185.4),
+    ("InC", 79.51, 46.2, 18, 3, 185.4),
+], columns=["Method", "Energy captured (%)", "Found true peak (%)", "Steps", "Readings", "Worst case (W)"])
+
+
+def _load_json(rel):
+    import json
+    p = _gcfg.RESULTS_DIR / rel
+    try:
+        return json.loads(p.read_text())
+    except Exception:
+        return None
+
+
+# --------------------------------------------------------------------------- #
+# Reading harness exports
+#
+# The dashboard never computes a benchmark number. It reads what the phase2
+# runners wrote. Every read goes through these, so a missing file or a missing
+# variant produces a named callout rather than a KeyError or, worse, a number
+# invented to fill the hole.
+# --------------------------------------------------------------------------- #
+_EXPORT_SCRIPT = {
+    "phase2/tracker_comparison_val.json": "phase2/p7_tracker_comparison.py --split val",
+    "phase2/pso_comparison_val.json": "phase2/p9_pso_comparison.py --split val",
+    "phase2/dynamic_comparison_30-100_val.json": "phase2/p10_dynamic_comparison.py --split val",
+    "phase2/dynamic_comparison_10-50_val.json":
+        "phase2/p10_dynamic_comparison.py --split val --sequence 10-50",
+    "phase2/relocation_comparison_pole.json": "phase2/p12_relocation_comparison.py --family pole",
+}
+
+
+def _export_path(rel):
+    return _gcfg.RESULTS_DIR / rel
+
+
+def _export_meta(rel, data) -> dict:
+    """The provenance fields an export actually carries. Absent = absent."""
+    data = data or {}
+    return {"path": str(_export_path(rel)),
+            "split": data.get("split"),
+            "n": data.get("n_scenarios") or data.get("n_shaded") or data.get("n_windows"),
+            "seed": data.get("seed"), "version": data.get("version")}
+
+
+def missing_export(rel, what=""):
+    """Say which file is missing and which script writes it. Never substitute."""
+    script = _EXPORT_SCRIPT.get(rel, "the phase2 runner that writes it")
+    ui.callout(f"{what + ' needs ' if what else 'Missing export: '}`{rel}`, which is "
+               f"produced by `{script}`. Nothing is shown here rather than an estimate.",
+               "Export not found", "limit")
+
+
+def missing_field(rel, key, what=""):
+    script = _EXPORT_SCRIPT.get(rel, "its phase2 runner")
+    ui.callout(f"`{rel}` does not contain {'`' + str(key) + '`'}"
+               f"{' for ' + what if what else ''}. Re-run `{script}` with a version that "
+               f"writes it; the figure is shown as — rather than filled in.",
+               "Missing field", "caveat")
+
+
+def _fmt(v, spec="{:.2f}", dash="—"):
+    """Format a number, or a dash when the export did not carry it."""
+    try:
+        if v is None:
+            return dash
+        f = float(v)
+        if f != f:                      # NaN — censored, not zero
+            return dash
+        return spec.format(f)
+    except (TypeError, ValueError):
+        return dash
+
+
+def page_compare():
+    import json
+    import pandas as pd
+    c = ui.T()
+    t_rel, p_rel = "phase2/tracker_comparison_val.json", "phase2/pso_comparison_val.json"
+    tc = _load_json(t_rel)
+    pso = _load_json(p_rel)
+    sub = "multi_peak"
+    n_sub = ((tc or {}).get("results") or {}).get("P&O", {}).get(sub, {}).get("n")
+    ui.page_intro("Compare methods",
+                  f"Every method on the same {_fmt(n_sub, '{:.0f}')} multi-peak validation "
+                  f"curves.", "Testing")
+
+    if not tc:
+        missing_export(t_rel, "The tracker comparison")
+        ui.callout("The table below is a recorded SNAPSHOT of an earlier run, kept so the "
+                   "page is not blank. It is labelled as such and must not be quoted.",
+                   "Snapshot, not a live export", "caveat")
+        st.dataframe(_SNAPSHOT, hide_index=True, width="stretch")
+        return
+
+    R = tc["results"]
+
+    def g(key):
+        """One variant's multi-peak row, or None when the export lacks it."""
+        b = (R.get(key) or {}).get(sub)
+        if not b:
+            return None
+        return dict(energy=b.get("steady_eff_pct"), found=b.get("reached_pct"),
+                    steps=b.get("median_conv_steps"), worst=b.get("worst_energy_lost_w"))
+
+    head_key = "hybrid, bounded"                 # D4: code default is the headline
+    rows = []
+    for key in (head_key, "hybrid, free", "seed only", "P&O", "InC"):
+        r = g(key)
+        if r is None:
+            missing_field(t_rel, key, "the comparison table")
+            continue
+        rows.append((method_label(key), key, r))
+    hyb = g(head_key)
+
+    pso_read, pso_best = _pso_readings(pso)
+    pso_row = None
+    if pso_best:
+        pso_row = dict(energy=pso_best.get(f"{sub}_steady_eff_pct"),
+                       found=pso_best.get(f"{sub}_reached_pct"),
+                       steps=pso_best.get(f"{sub}_median_conv_steps"),
+                       worst=pso_best.get(f"{sub}_worst_energy_lost_w"))
+        rows.insert(2, ("PSO (best of sweep, selected on val)", "PSO", pso_row))
+    elif pso:
+        missing_field(p_rel, "pso_sweep", "the PSO row")
+
+    # ---- KPIs: cost first, because that is where the difference is ----------
+    kp = []
+    if hyb and pso_row and pso_read:
+        ratio = pso_read / SEED_PROBE_COST
+        kp.append(("Readings per cycle — Hybrid vs PSO", f"{ratio:.0f}× fewer",
+                   f"{SEED_PROBE_COST} against {pso_read}, at "
+                   f"{_fmt(hyb['found'], '{:.1f}')}% vs {_fmt(pso_row['found'], '{:.1f}')}% "
+                   f"arrival", "hero"))
+    if hyb:
+        kp.append(("Found true peak", f"{_fmt(hyb['found'], '{:.1f}')}%",
+                   f"{method_label(head_key)}, multi-peak subset"))
+        kp.append(("Worst case", f"{_fmt(hyb['worst'], '{:.1f}')} W",
+                   "largest single-scenario loss"))
+    if kp:
+        ui.kpi_row(kp, weights=[1.6, 1, 1][:len(kp)])
+
+    left, right = st.columns([1.35, 1], gap="large")
+    with left:
+        def reads_for(key):
+            if key == "PSO":
+                return pso_read
+            base = method_label(key).split(" (")[0]
+            return _READINGS_FIXED.get(base)
+
+        df = pd.DataFrame([{
+            "Method": label,
+            "Found true peak (%)": None if r["found"] is None else round(r["found"], 1),
+            "Worst case (W)": None if r["worst"] is None else round(r["worst"], 1),
+            "Steps": ("—" if r["steps"] is None else int(r["steps"])),
+            "Readings": reads_for(key) if reads_for(key) is not None else "—",
+            "Energy captured (%)": None if r["energy"] is None else round(r["energy"], 2),
+        } for label, key, r in rows])
+        # No progress bars: a bar that starts at 78% turns a saturated metric into
+        # a ranking, which is exactly what the project says not to do with it.
+        st.dataframe(df, hide_index=True, width="stretch")
+        ui.legend_note(
+            f"Multi-peak subset, n={_fmt(n_sub, '{:.0f}')}, split "
+            f"{tc.get('split', '—')}, validated engine. Steps are conditional on "
+            f"arrival — read them beside Found true peak, never alone. Energy "
+            f"captured is saturated for every seeded method and is a value here, "
+            f"not a discriminator.")
+    with right:
+        fig = go.Figure()
+        for label, key, r in rows:
+            x = reads_for(key)
+            if x is None or r["energy"] is None:
+                continue
+            fig.add_trace(go.Scatter(x=[x], y=[max(100 - r["energy"], 0.01)],
+                                     mode="markers+text", name=label, text=[label],
+                                     textposition="middle right",
+                                     marker=dict(size=13,
+                                                 color=ui.method_style(label)["color"])))
+        fig.update_xaxes(type="log", title_text="readings per cycle")
+        fig.update_yaxes(type="log", title_text="energy lost (%)")
+        ui.style_fig(fig, height=360)
+        fig.update_layout(showlegend=False,
+                          title="Energy lost against readings per cycle",
+                          margin=dict(r=90))
+        ui.show_chart(fig, key="compare_cost")
+
+    if hyb and pso_row:
+        ui.callout(
+            f"{method_label(head_key)} and PSO record "
+            f"{_fmt(hyb['energy'], '{:.2f}')}% and {_fmt(pso_row['energy'], '{:.2f}')}% "
+            f"energy captured — the advantage is cost, not accuracy. "
+            f"Split {tc.get('split', '—')}, n={_fmt(n_sub, '{:.0f}')}, validated engine, "
+            f"simulated throughout; no field measurements. The PSO row is the "
+            f"best-arrival row of a {len(pso.get('pso_sweep', []))}-point sweep selected "
+            f"on this same split, and the export records "
+            f"arrival_separable_by_population = {pso.get('arrival_separable_by_population')}.",
+            "Read these alongside", "caveat")
+    ui.provenance({t_rel.split("/")[-1]: _export_meta(t_rel, tc),
+                   p_rel.split("/")[-1]: _export_meta(p_rel, pso)})
+
+    e1, e2 = st.columns(2)
+    e1.download_button("Download table (CSV)", df.to_csv(index=False),
+                       "compare_methods.csv", "text/csv", use_container_width=True,
+                       key="compare_csv")
+    e2.download_button("Download figure data (JSON)",
+                       json.dumps({"rows": [{"label": l, "key": k, **r}
+                                             for l, k, r in rows],
+                                   "readings": {k: reads_for(k) for _, k, _ in rows},
+                                   "provenance": {t_rel: _export_meta(t_rel, tc),
+                                                  p_rel: _export_meta(p_rel, pso)}},
+                                  indent=2, default=str),
+                       "compare_methods.json", "application/json",
+                       use_container_width=True, key="compare_json")
+
+
+def _mv_demo() -> dict:
+    return dict(module=_demo_module()[0], temp=43.0, shaded=(910.0, 300.0, 600.0))
+
+
+@st.cache_data(show_spinner=True)
+def _dynamic_day(sequence, shaded, module, temp, shaded_irr):
+    """One EN 50530 ramp profile stepped by every tracker — real per-step power."""
+    import numpy as np
+    from gmppt import dynamic as dyn, tracking as trk, trackers as trkx, pso
+    from gmppt.scenarios import Scenario
+    slopes = [r[1] for r in dyn.SEQUENCES[sequence][1]]
+    prof = dyn.make_profile(sequence, slopes[len(slopes) // 2], max_cycles=1)
+    m, tp = str(module), float(temp)
+    shaded_irr = [float(x) for x in shaded_irr]
+    # The unshaded reference must sit at the SAME base irradiance as the shaded
+    # demo, or the gap between the two lines is partly a brightness difference
+    # rather than the shading it is labelled as. (R16)
+    base = max(shaded_irr)
+    irr = shaded_irr if shaded else [base] * len(shaded_irr)
+    sc = Scenario(m, tp, geometry_of(irr), list(irr), False)
+    uni_irr = [base] * len(shaded_irr)
+    uni = Scenario(m, tp, geometry_of(uni_irr), uni_irr, False)
+
+    def avail_line(scn):
+        tj = dyn.dynamic_trajectory_for(scn, prof)
+        pg = np.array([cc[3] for cc in tj.curves])
+        return np.repeat(pg, tj.block_steps).astype(float)
+
+    shaded_av = avail_line(sc)
+    unshaded_av = avail_line(uni)
+    traces = {}
+
+    def run(name, fn, **kw):
+        tj = dyn.dynamic_trajectory_for(sc, prof)
+        fn(tj, n_steps=tj.n_steps, **kw)
+        traces[name] = [float(x) for x in tj.p_hist]
+
+    run("P&O", trk.perturb_and_observe)
+    run("InC", trkx.incremental_conductance)
+    run("PSO", pso.particle_swarm)
+    model = _c3_model()
+    if model is not None:
+        from gmppt import hybrid as hyb
+        run("Hybrid (bounded)", hyb.make_hybrid(model), temp_c=tp)
+        run("Model only", hyb.make_seed_only(model), temp_c=tp)
+    return dict(avail=[float(x) for x in shaded_av],
+                unshaded=[float(x) for x in unshaded_av],
+                traces=traces, t0=20, base_irr=base, has_model=model is not None)
+
+
+# =========================================================================== #
+# Testing · Shading relocation  (p12 export)
+# =========================================================================== #
+_RELOC_ROWS = ["hybrid, triggered reseed", "hybrid, never reseed", "PSO",
+               "PSO, triggered reseed", "seed only", "P&O", "InC"]
+
+
+def page_relocation():
+    c = ui.T()
+    ui.page_intro("Shading relocation",
+                  "One clean relocation event: the tallest peak moves to another "
+                  "substring, and each method has to find it again.",
+                  "Testing · Shading relocation")
+    rel = "phase2/relocation_comparison_pole.json"
+    R = _load_json(rel)
+    if not R:
+        missing_export(rel, "The relocation comparison")
+        ui.not_built("Drift and cloud relocation families",
+                     "Only the pole single-jump family has been run. The drifting-pole "
+                     "and cloud-transit families are planned and are not offered as "
+                     "options here.")
+        return
+
+    S = R.get("stats") or {}
+    jump = R.get("settle_steps")
+    hold = R.get("window_steps")
+    ui.kpi_row([
+        ("Relocation windows", f"{R.get('n_windows', '—')}",
+         f"{R.get('discarded', '—')} discarded by the screen", "hero"),
+        ("Window shape", f"settle {_fmt(jump, '{:.0f}')} → hold {_fmt(hold, '{:.0f}')}",
+         "the jump falls at the end of the settle block"),
+        ("Trigger threshold", f"{_fmt(100 * (R.get('trigger_drop_frac') or 0), '{:.0f}')}%",
+         "measured power drop below the recent best"),
+    ])
+
+    # ---- gates -------------------------------------------------------------
+    with st.container(border=True):
+        st.markdown(_bh("Data-validation gates"), unsafe_allow_html=True)
+        crit = R.get("criteria") or {}
+        gates = R.get("gates") or R.get("gate_counts")
+        if gates:
+            cells = "".join(
+                f"<span style='color:{c['text_muted']}'>{_e(k)}</span><span>{_e(v)}</span>"
+                for k, v in gates.items())
+            st.markdown(f"<div class='bmono' style='display:grid;"
+                        f"grid-template-columns:1fr 1fr;gap:6px 14px;max-width:460px;"
+                        f"font-size:12.5px'>{cells}</div>", unsafe_allow_html=True)
+        else:
+            ui.callout(
+                "Gate counts are not in this export — the result cannot be presented as "
+                "gated. `relocation_comparison_pole.json` carries a single `discarded` "
+                f"total ({R.get('discarded', '—')}) and the four declared acceptance "
+                "criteria below, but no per-gate G1–G6 pass/discard counts and no "
+                "separate G5 uniform-control result. Re-run "
+                "`phase2/p12_relocation_comparison.py` with a version that writes them "
+                "before quoting this table as gated.",
+                "Not presentable as gated", "limit")
+        if crit:
+            names = {"c1": "triggered re-converges on the declared fraction of events",
+                     "c2": "re-convergence margin exceeds the across-module spread",
+                     "c3": "trigger fires near the actual jump (false-trigger rate low)",
+                     "c4": "uniform control (G5): no re-convergence and no trigger firing"}
+            rows = "".join(
+                f"<span class='bmono'>{_e(k)}</span>"
+                f"<span style='color:{c['teal'] if v else c['red']}'>"
+                f"{'PASS' if v else 'FAIL'}</span>"
+                f"<span style='font-size:12.5px'>{_e(names.get(k, ''))}</span>"
+                for k, v in crit.items())
+            st.markdown(f"<div style='margin-top:10px;display:grid;"
+                        f"grid-template-columns:auto auto 1fr;gap:6px 14px;"
+                        f"font-size:13px;align-items:baseline'>{rows}</div>",
+                        unsafe_allow_html=True)
+            st.caption("These are the four criteria p12 declared before the run. They are "
+                       "an acceptance verdict, not the per-gate data-validation counts.")
+
+    # ---- the table ---------------------------------------------------------
+    with st.container(border=True):
+        st.markdown(_bh("What each method did after the jump"), unsafe_allow_html=True)
+        head = "".join(f"<span style='color:{c['text_muted']};font-size:11.5px'>{h}</span>"
+                       for h in ("method", "re-converged (fraction)", "steps (median)",
+                                 "worst", "transition energy lost"))
+        body = ""
+        for key in _RELOC_ROWS:
+            sm = S.get(key)
+            if not sm:
+                continue
+            # The export declares no epsilon, so reconv_frac is shown as the number
+            # it is rather than converted to yes/no against a threshold this page
+            # would have to invent.
+            body += (f"<span style='font-weight:500'>{_e(method_label(key))}</span>"
+                     f"<span>{_fmt(sm.get('reconv_frac'), '{:.2f}')}</span>"
+                     f"<span>{_fmt(sm.get('median'), '{:.0f}')}</span>"
+                     f"<span>{_fmt(sm.get('worst'), '{:.0f}')}</span>"
+                     f"<span>{_fmt(sm.get('energy_loss_pct'), '{:.1f}')}%</span>")
+        st.markdown(f"<div class='bmono' style='display:grid;"
+                    f"grid-template-columns:1.6fr 1.2fr 1fr .7fr 1.2fr;gap:6px 12px;"
+                    f"font-size:12.5px'>{head}{body}</div>", unsafe_allow_html=True)
+        ui.legend_note(
+            "A dash is a censored value: the method never re-converged, so it has no "
+            "step count. Re-converged is the fraction of windows in which the method "
+            "reached and held the new peak; this export does not record the epsilon "
+            "that defines 'reached', so the fraction is shown rather than a verdict.")
+
+        if any((S.get(k) or {}).get("reconv_frac") for k in
+               ("hybrid, triggered reseed", "PSO, triggered reseed")):
+            missing_field(rel, "trigger_rate / false_trigger_rate",
+                          "the triggered variants")
+
+    # ---- what the numbers say, built from the numbers -----------------------
+    trig = S.get("hybrid, triggered reseed") or {}
+    never = S.get("hybrid, never reseed") or {}
+    stateless = {k: (S.get(k) or {}).get("energy_loss_pct")
+                 for k in ("P&O", "InC", "PSO", "seed only", "hybrid, never reseed")}
+    vals = [v for v in stateless.values() if v is not None]
+    if trig:
+        ui.callout(
+            f"Family {R.get('family', '—')}, {R.get('n_windows', '—')} relocation windows. "
+            f"{method_label('hybrid, triggered reseed')} recovers in a median of "
+            f"{_fmt(trig.get('median'), '{:.0f}')} steps "
+            f"(worst {_fmt(trig.get('worst'), '{:.0f}')}, s.e. "
+            f"{_fmt(trig.get('se'), '{:.2f}')}) and loses "
+            f"{_fmt(trig.get('energy_loss_pct'), '{:.1f}')}% in transit, while "
+            f"{method_label('hybrid, never reseed')} loses "
+            f"{_fmt(never.get('energy_loss_pct'), '{:.1f}')}%. "
+            + (f"The stateless methods lose between {min(vals):.1f}% and "
+               f"{max(vals):.1f}%. " if vals else "")
+            + f"The jump falls at control step {_fmt(jump, '{:.0f}')}. "
+              f"Only a measurement-triggered re-seed follows the peak; that is the "
+              f"honest negative the triggered variant exists to fix, and it is reported.",
+            "Read from the export", "info")
+    ui.provenance({rel.split("/")[-1]: _export_meta(rel, R)})
+
+    ui.not_built("Drift and cloud relocation families",
+                 "Only the pole single-jump family has been run. The drifting-pole and "
+                 "cloud-transit families are planned; they are named here rather than "
+                 "offered as controls that would do nothing.")
+
+
+# =========================================================================== #
+# Testing · Results vs targets
+# =========================================================================== #
+# Targets are NOT in any export. The static one is quoted from the funded
+# proposal; the other two are not recorded anywhere in this repository, so they
+# are shown as missing rather than invented. D2 decides which metric the static
+# target is measured on, so both candidate rows are shown until it is answered.
+_TARGETS = {
+    "static_arrival": dict(
+        row="Static partial shading — arrival rate", target=99.5,
+        source="funded proposal, as quoted in the revision brief",
+        pending="definition pending advisor decision (D2)"),
+    "static_steady": dict(
+        row="Static partial shading — steady efficiency", target=99.5,
+        source="funded proposal, as quoted in the revision brief",
+        pending="definition pending advisor decision (D2)"),
+    "dynamic": dict(
+        row="Dynamic EN 50530 — tracking efficiency", target=None,
+        source="not recorded in this repository", pending=""),
+    "convergence": dict(
+        row="Convergence time", target=None,
+        source="not recorded in this repository", pending=""),
+}
+
+
+def page_results():
+    c = ui.T()
+    ui.page_intro("Results vs targets",
+                  "Each funded target beside what was measured, and the caveats that "
+                  "belong to it.", "Testing · Results vs targets")
+
+    t_rel = "phase2/tracker_comparison_val.json"
+    d_rel = "phase2/dynamic_comparison_30-100_val.json"
+    p_rel = "phase2/pso_comparison_val.json"
+    T = _load_json(t_rel)
+    D = _load_json(d_rel)
+    Pj = _load_json(p_rel)
+    if not T:
+        missing_export(t_rel, "The static result")
+    if not D:
+        missing_export(d_rel, "The dynamic result")
+
+    head_key = "hybrid, bounded"
+    static = ((T or {}).get("results") or {}).get(head_key, {}).get("multi_peak") or {}
+    dyn_sh = ((D or {}).get("results") or {}).get("shaded") or {}
+    dyn_row = dyn_sh.get("hybrid, no reseed") or {}
+
+    rows = []
+    rows.append(dict(
+        key="static_arrival", achieved=static.get("reached_pct"), se=None,
+        n=static.get("n"), split=(T or {}).get("split"),
+        note=f"{method_label(head_key)}, multi-peak subset"))
+    rows.append(dict(
+        key="static_steady", achieved=static.get("steady_eff_pct"), se=None,
+        n=static.get("n"), split=(T or {}).get("split"),
+        note=f"{method_label(head_key)}, multi-peak subset — saturated"))
+    rows.append(dict(
+        key="dynamic", achieved=dyn_row.get("aggregate_pct"),
+        se=dyn_row.get("scenario_se_pct"), n=dyn_row.get("n_trajectories"),
+        split=(D or {}).get("split"),
+        note=f"{method_label('hybrid, no reseed')}, shaded, Seq "
+             f"{(D or {}).get('sequence', '—')}"))
+    rows.append(dict(
+        key="convergence", achieved=static.get("median_conv_steps"), se=None,
+        n=static.get("n"), split=(T or {}).get("split"),
+        note="median control steps to converge, conditional on arrival"))
+
+    head = "".join(
+        f"<span style='color:{c['text_muted']};font-size:11.5px'>{h}</span>"
+        for h in ("target", "required", "achieved", "± s.e.", "n", "split", "verdict"))
+    body = ""
+    for r in rows:
+        spec = _TARGETS[r["key"]]
+        tgt = spec["target"]
+        ach = r["achieved"]
+        if tgt is None or ach is None:
+            verdict, tone = "—", c["text_muted"]
+        elif r["key"] == "convergence":
+            verdict, tone = "—", c["text_muted"]
+        else:
+            passed = float(ach) >= float(tgt)
+            verdict = "PASS" if passed else "NOT MET"
+            tone = c["teal"] if passed else c["red"]
+        req = f"{tgt:.1f}%" if tgt is not None else "not recorded"
+        fmt = "{:.1f}" if r["key"] == "convergence" else "{:.2f}"
+        unit = "" if r["key"] == "convergence" else "%"
+        body += (f"<span style='font-weight:500'>{_e(spec['row'])}"
+                 + (f"<br><span style='font-size:11px;color:{c['amber_text']}'>"
+                    f"{_e(spec['pending'])}</span>" if spec["pending"] else "")
+                 + f"<br><span style='font-size:11px;color:{c['text_muted']}'>"
+                   f"{_e(r['note'])}</span></span>"
+                 f"<span>{_e(req)}</span>"
+                 f"<span>{_fmt(ach, fmt)}{unit}</span>"
+                 f"<span>{_fmt(r['se'], '{:.3f}')}</span>"
+                 f"<span>{_fmt(r['n'], '{:.0f}')}</span>"
+                 f"<span>{_e(r['split'] or '—')}</span>"
+                 f"<span style='color:{tone};font-weight:600'>{verdict}</span>")
+    st.markdown(f"<div style='display:grid;"
+                f"grid-template-columns:2.6fr .9fr .9fr .8fr .7fr .6fr .9fr;"
+                f"gap:10px 14px;font-size:13px;align-items:baseline'>{head}{body}</div>",
+                unsafe_allow_html=True)
+    st.caption("Targets are not carried in any export. The static target is quoted from "
+               "the funded proposal; the dynamic and convergence targets are not "
+               "recorded in this repository and are shown as such rather than guessed.")
+
+    ui.callout(
+        "Read every row above with these attached. "
+        "(1) Against PSO the advantage is cost, not accuracy: the two record the same "
+        "energy captured and differ in readings per cycle. "
+        "(2) The dynamic margin over P&O is inherited from static trapping — the EN "
+        "50530 profile ramps irradiance but barely moves the peak location. "
+        "(3) Steady efficiency is saturated near 100% for every seeded method and is "
+        "reported as a value, never as a discriminator. "
+        "(4) Convergence figures are conditional on arrival and must be read beside the "
+        "arrival column. "
+        "(5) All data is simulated; there are no field measurements behind any number "
+        "here. "
+        "(6) The held-out generalisation split has not been evaluated — every figure on "
+        "this page is a validation-split figure.",
+        "Caveats that travel with these numbers", "caveat")
+
+    ui.provenance({t_rel.split("/")[-1]: _export_meta(t_rel, T),
+                   d_rel.split("/")[-1]: _export_meta(d_rel, D),
+                   p_rel.split("/")[-1]: _export_meta(p_rel, Pj)})
+
+    import json
+    csv = "target,required,achieved,se,n,split\n" + "\n".join(
+        f"\"{_TARGETS[r['key']]['row']}\","
+        f"{_TARGETS[r['key']]['target'] if _TARGETS[r['key']]['target'] is not None else ''},"
+        f"{'' if r['achieved'] is None else r['achieved']},"
+        f"{'' if r['se'] is None else r['se']},{r['n'] or ''},{r['split'] or ''}"
+        for r in rows)
+    e1, e2 = st.columns(2)
+    e1.download_button("Download table (CSV)", csv, "results_vs_targets.csv", "text/csv",
+                       use_container_width=True, key="results_csv")
+    e2.download_button("Download figure data (JSON)",
+                       json.dumps({"rows": rows, "targets": _TARGETS,
+                                   "provenance": {t_rel: _export_meta(t_rel, T),
+                                                  d_rel: _export_meta(d_rel, D)}},
+                                  indent=2, default=str),
+                       "results_vs_targets.json", "application/json",
+                       use_container_width=True, key="results_json")
+
+
+# =========================================================================== #
+# The data · Benchmark scenario set
+# =========================================================================== #
+def page_benchset():
+    c = ui.T()
+    ui.page_intro("Benchmark scenario set",
+                  "What the Testing figures were measured on.", "The data")
+    t_rel = "phase2/tracker_comparison_val.json"
+    d_rel = "phase2/dynamic_comparison_30-100_val.json"
+    n_rel = "phase2/near_tie_screen.json"
+    T, D, N = _load_json(t_rel), _load_json(d_rel), _load_json(n_rel)
+    if not T and not D:
+        missing_export(t_rel, "The benchmark scenario set")
+        return
+
+    mp = ((T or {}).get("results") or {}).get("P&O", {}).get("multi_peak") or {}
+    sp = ((T or {}).get("results") or {}).get("P&O", {}).get("single_peak") or {}
+    ui.kpi_row([
+        ("Static multi-peak scenarios", _fmt(mp.get("n"), "{:.0f}"),
+         f"split {(T or {}).get('split', '—')} · of "
+         f"{_fmt((T or {}).get('n_scenarios'), '{:.0f}')} total", "hero"),
+        ("Static single-peak", _fmt(sp.get("n"), "{:.0f}"), "the control subset"),
+        ("Shaded dynamic scenarios", _fmt((D or {}).get("n_shaded"), "{:.0f}"),
+         f"uniform {_fmt((D or {}).get('n_uniform'), '{:.0f}')} · EN 50530"),
+    ], weights=[1.3, 1, 1.2])
+
+    with st.container(border=True):
+        st.markdown(_bh("How the set is built"), unsafe_allow_html=True)
+        mix = _scen.GEOMETRY_MIX
+        cells = "".join(
+            f"<span style='color:{c['text_muted']}'>{_e(k.replace('_', '-'))}</span>"
+            f"<span>{100 * v:.0f}%</span>" for k, v in mix.items())
+        st.markdown(f"<div class='bmono' style='display:grid;"
+                    f"grid-template-columns:1fr .5fr;gap:6px 14px;max-width:320px;"
+                    f"font-size:13px'>"
+                    f"<span style='color:{c['text_muted']}'>geometry</span>"
+                    f"<span style='color:{c['text_muted']}'>share</span>"
+                    f"{cells}</div>", unsafe_allow_html=True)
+        st.markdown(
+            f"- **Split** — `{(T or {}).get('split', '—')}`, resolved through "
+            f"`gmppt.dataset.module_split().val`: the same modules "
+            f"`p7_tracker_comparison.py --split val` runs on. The 20% held-out test "
+            f"set is not used anywhere in this dashboard.\n"
+            f"- **Seed** — everything derives from `config.MASTER_SEED` via "
+            f"`config.seed_for`, so one number reproduces the whole set.\n"
+            f"- **Temperatures** — {', '.join(str(int(t)) for t in _scen.TEMPERATURES)} °C.\n"
+            f"- **Irradiance** — {_scen.IRR_MIN:.0f}–{_scen.IRR_MAX:.0f} W/m².")
+        if N:
+            frac = N.get("near_tie_fraction") or N.get("fraction")
+            if frac is not None:
+                st.markdown(f"- **Near ties** — {float(frac) * 100:.1f}% of scenarios have "
+                            f"two peaks close enough that picking the wrong one costs "
+                            f"almost nothing.")
+            else:
+                missing_field(n_rel, "near_tie_fraction", "the near-tie share")
+        else:
+            missing_field(n_rel, "the file", "the near-tie share")
+
+    ui.provenance({t_rel.split("/")[-1]: _export_meta(t_rel, T),
+                   d_rel.split("/")[-1]: _export_meta(d_rel, D)})
+    st.page_link(P["sources"], label="Where it comes from →")
+
+
+def page_moving():
+    import numpy as np
+    c = ui.T()
+    disp, mono = ui.FONTS["display"], ui.FONTS["mono"]
+    st.markdown(f"<style>.bh{{font-family:{disp};font-weight:700;color:{c['text']};}}"
+                f"</style>", unsafe_allow_html=True)
+    ui.page_intro("Dynamic irradiance",
+                  "How each tracking method responds while the irradiance changes, on the "
+                  "EN 50530 ramp profile.", "Testing · Dynamic irradiance")
+    # ---- irradiance profile + KPIs from the aggregate export ----
+    scen = st.segmented_control("Irradiance profile",
+                                ["EN 50530 · Seq 30-100", "EN 50530 · Seq 10-50",
+                                 "Unshaded control"],
+                                default="EN 50530 · Seq 30-100", key="mv_scen") \
+        or "EN 50530 · Seq 30-100"
+    st.caption("EN 50530 irradiance ramp, stepped on a control-step axis. This is a "
+               "standard ramp profile, not a time-of-day sun path.")
+    seq = "10-50" if "10-50" in scen else "30-100"
+    shaded = "Unshaded" not in scen
+
+    rel = f"phase2/dynamic_comparison_{seq}_val.json"
+    dyj = _load_json(rel)
+    if not dyj:
+        missing_export(rel, "The dynamic comparison")
+    else:
+        sh = (dyj.get("results") or {}).get("shaded" if shaded else "uniform") or {}
+
+        def agg(m):
+            return (sh.get(m) or {}).get("aggregate_pct")
+
+        def se_of(m):
+            return (sh.get(m) or {}).get("scenario_se_pct")
+
+        hyb_key = "hybrid, no reseed"
+        hyb, pso_v, po = agg(hyb_key), agg("PSO"), agg("P&O")
+        if hyb is None:
+            missing_field(rel, hyb_key, "the headline efficiency")
+        kp = [("Dynamic efficiency", f"{_fmt(hyb, '{:.3f}')}%",
+               f"{_METHOD_LABELS.get(hyb_key, hyb_key)} · ±{_fmt(se_of(hyb_key), '{:.3f}')}"
+               f" · EN 50530 Seq {dyj.get('sequence', seq)}", "hero")]
+        # PSO and P&O carry their own s.e., so a reader can see whether the gap
+        # is separable rather than being shown a bare difference.
+        if hyb is not None and pso_v is not None:
+            kp.append(("vs PSO", f"{hyb - pso_v:+.2f} pt",
+                       f"PSO {_fmt(pso_v, '{:.3f}')}% ±{_fmt(se_of('PSO'), '{:.3f}')}"))
+        if hyb is not None and po is not None:
+            kp.append(("vs P&O", f"{hyb - po:+.1f} pt",
+                       f"P&O {_fmt(po, '{:.3f}')}% ±{_fmt(se_of('P&O'), '{:.3f}')}"))
+        ui.kpi_row(kp)
+
+        rs_key = "hybrid, reseed each block"
+        if rs_key in sh:
+            rs = sh[rs_key]
+            credited = dyj.get("reseed_credited")
+            ui.callout(
+                f"Reseeding at every block boundary scores "
+                f"{_fmt(rs.get('aggregate_pct'), '{:.3f}')}% "
+                f"±{_fmt(rs.get('scenario_se_pct'), '{:.3f}')} against "
+                f"{_fmt(hyb, '{:.3f}')}% for the same hybrid without it, for a probe "
+                f"overhead of {_fmt(rs.get('reseed_probe_overhead_pct'), '{:.2f}')}%. "
+                f"The export records reseed_credited = {credited}.",
+                "Negative result — reseeding each block is not credited", "caveat")
+        ui.provenance({rel.split('/')[-1]: _export_meta(rel, dyj)})
+
+    # ---- live per-step traces on the fixed demo module ----
+    demo = _mv_demo()
+    try:
+        day = _dynamic_day(seq, shaded, demo["module"], demo["temp"], demo["shaded"])
+    except Exception as e:
+        ui.callout(f"Could not compute the dynamic trajectory ({e}).", "Trace unavailable", "limit")
+        return
+    if not day.get("has_model"):
+        ui.callout("The trained seed (`results/phase3/c3_two_stage.pkl`) is not loadable, "
+                   "so Hybrid and Model only are absent from the traces below. The "
+                   "classical trackers are real.", "Hybrid unavailable", "limit")
+
+    avail = np.array(day["avail"]); unshaded = np.array(day["unshaded"])
+    t0 = day["t0"]
+    x = np.arange(len(avail))
+    all_methods = [m for m in ("Hybrid (bounded)", "P&O", "PSO", "Model only", "InC")
+                   if m in day["traces"]]
+    default = [m for m in ("Hybrid (bounded)", "P&O") if m in all_methods] or all_methods[:1]
+    sel = st.segmented_control("Show", all_methods, selection_mode="multi",
+                               default=default, key="mv_show") or default
+    mode = st.segmented_control("mode", ["Power", "Efficiency %"], default="Power",
+                                key="mv_mode", label_visibility="collapsed") or "Power"
+
+    def trim(a):
+        return a[t0:]
+    xs = trim(x)
+
+    with st.container(border=True):
+        st.markdown(f"<span class='bh' style='font-size:17px'>Power through the profile</span>"
+                    f"<span style='font-size:13px;color:{c['text_muted']};margin-left:10px'>"
+                    f"the gap to the dotted line is shading; the gap to the dark line is "
+                    f"tracking — only the second one is ours</span>", unsafe_allow_html=True)
+        fig = go.Figure()
+        if mode == "Power":
+            fig.add_trace(go.Scatter(x=xs, y=trim(unshaded), name="unshaded potential",
+                          line=dict(color="#B5641A", width=2, dash="dot")))
+            fig.add_trace(go.Scatter(x=xs, y=trim(avail), name="available at true peak",
+                          line=dict(color="#2B3238", width=2.5)))
+            for m in sel:
+                fig.add_trace(go.Scatter(x=xs, y=trim(np.array(day["traces"][m])), name=m,
+                              line=dict(width=2, **ui.method_style(m))))
+            ui.style_fig(fig, height=320, x_title="EN 50530 profile (control steps)",
+                         y_title="power (W)")
+        else:
+            eff = lambda a: np.where(avail > 1e-9, 100 * a / avail, 100.0)
+            fig.add_trace(go.Scatter(x=xs, y=trim(np.full_like(avail, 100.0)),
+                          name="available", line=dict(color="#2B3238", width=2)))
+            for m in sel:
+                fig.add_trace(go.Scatter(x=xs, y=trim(eff(np.array(day["traces"][m]))), name=m,
+                              line=dict(width=2, **ui.method_style(m))))
+            ui.style_fig(fig, height=320, x_title="EN 50530 profile (control steps)",
+                         y_title="tracking efficiency (%)")
+            fig.update_yaxes(range=[60, 101])
+        fig.update_layout(legend=dict(orientation="h", y=1.08, x=0))
+        ui.show_chart(fig)
+
+    with st.container(border=True):
+        st.markdown(f"<span class='bh' style='font-size:17px'>Power lost to tracking</span>"
+                    f"<span style='font-size:13px;color:{c['text_muted']};margin-left:10px'>"
+                    f"the distance from the dark line above — shading excluded, the tracker's "
+                    f"own fault only</span>", unsafe_allow_html=True)
+        fig2 = go.Figure()
+        for m in sel:
+            loss = np.maximum(0.0, avail - np.array(day["traces"][m]))
+            fig2.add_trace(go.Scatter(x=xs, y=trim(loss), name=m,
+                           line=dict(width=2, **ui.method_style(m))))
+        ui.style_fig(fig2, height=170, x_title="EN 50530 profile (control steps)",
+                     y_title="power lost (W)")
+        fig2.update_layout(legend=dict(orientation="h", y=1.15, x=0))
+        ui.show_chart(fig2)
+
+    ui.callout("The x-axis is the EN 50530 ramp profile (control steps), not a clock. The "
+               "standard ramps irradiance but barely moves the peak location, so the margin "
+               "over P&O is largely static trapping carried into a changing scene.",
+               "Read this beside the traces", "caveat")
+
+    _your_day(c)
+
+    ui.not_built("Continuous day-long animation",
+                 "A future extension could animate the event timeline with a live playhead. "
+                 "The timing sliders on Explore · The panels are the functional stand-in; "
+                 "dragging and animated playback need a custom Streamlit component.")
+
+
+def _your_day(c):
+    """The event-based day run: exploratory, ungated, and labelled as such.
+
+    It lives here so it sits beside the gated EN 50530 result and cannot be
+    mistaken for it. The events themselves are built on Explore · The panels.
+    """
+    import numpy as np
+    with st.expander("Your day — event-based run (exploratory, not a benchmark)",
+                     expanded=False):
+        st.markdown('<div class="gm-sandbox"><b>Exploratory</b>'
+                    '<span>Not a benchmark result and not gated: an arbitrary event '
+                    'timeline you built, not a declared scenario set. No figure from '
+                    'here belongs beside a thesis number.</span></div>',
+                    unsafe_allow_html=True)
+        events = st.session_state.get("day_events") or []
+        ctx = st.session_state.get("day_context") or {}
+        if not events or not ctx:
+            ui.callout("Build a day on Explore · The panels — add events, set their timing "
+                       "and motion — then come back here to run them.",
+                       "No day events yet", "info")
+            st.page_link(P["panels"], label="Build a day on The panels →")
+            return
+        st.caption(f"{len(events)} event(s) on {ctx.get('module', '—')} · "
+                   f"{ctx.get('temp', '—')} °C · peak sun {ctx.get('base_G', '—')} W/m².")
+        if not st.button("Run the whole day through the trackers", key="yourday_run",
+                         type="primary"):
+            st.session_state.setdefault("day_ran", False)
+        else:
+            st.session_state["day_ran"] = True
+        if not st.session_state.get("day_ran"):
+            return
+
+        evkey = tuple((e["kind"], round(e["t0"], 3), round(e["t1"], 3),
+                       e.get("motion", "fixed in place")) for e in events)
+        try:
+            day = _day_run(ctx["module"], ctx["temp"], ctx["base_G"], evkey)
+        except Exception as e:
+            ui.callout(f"Could not run the day ({e}).", "Day run unavailable", "limit")
+            return
+        if not day.get("has_model"):
+            ui.callout("The trained seed is not loadable, so no hybrid trace is shown "
+                       "below. The classical trackers are real.",
+                       "Hybrid unavailable", "limit")
+
+        g2 = day.get("g2") or {}
+        tone = "info" if g2.get("passed") == g2.get("total") else "limit"
+        ui.callout(f"Curve-integrity check (G2): {g2.get('passed')}/{g2.get('total')} "
+                   f"slices reproduce their own p_gmpp at v_gmpp within "
+                   f"{g2.get('tol')}; worst relative error "
+                   f"{_fmt(g2.get('worst_rel'), '{:.2e}')}.",
+                   "Per-slice gate", tone)
+
+        t = np.array(day["t"])
+        figd = go.Figure()
+        figd.add_trace(go.Scatter(x=t, y=day["unshaded"], name="unshaded potential",
+                                  line=dict(color=ui.REF_COLORS["unshaded"],
+                                            dash="dot", width=2)))
+        figd.add_trace(go.Scatter(x=t, y=day["avail"], name="available at true peak",
+                                  line=dict(color=ui.REF_COLORS["available"], width=2.5)))
+        for m, ph in day["methods"].items():
+            figd.add_trace(go.Scatter(x=t, y=ph, name=m,
+                                      line=dict(width=2, **ui.method_style(m))))
+        figd.add_vline(x=st.session_state.get("day_time", 15.0),
+                       line=dict(color=c["amber"], width=1.5, dash="dot"))
+        ui.style_fig(figd, height=300, x_title="time of day (h)", y_title="power (W)")
+        figd.update_layout(legend=dict(orientation="h", y=1.1, x=0))
+        ui.show_chart(figd, key="yourday_power")
+        cells = "".join(f"<span style='font-weight:500'>{_e(m)}</span>"
+                        f"<span>{v:.2f}%</span>" for m, v in day["energy"].items())
+        st.markdown(f"<div class='bmono' style='display:grid;"
+                    f"grid-template-columns:1fr .7fr;gap:6px 14px;max-width:360px;"
+                    f"font-size:13px'><span style='color:{c['text_muted']}'>method</span>"
+                    f"<span style='color:{c['text_muted']}'>energy captured</span>"
+                    f"{cells}</div>", unsafe_allow_html=True)
+        ui.legend_note(f"{day.get('slices')} irradiance slices over a sun-arc profile with "
+                       f"your events. A drifting shadow sweeps continuously across the "
+                       f"strips; it does not jump between them.")
+
+
+# =========================================================================== #
+# The data
+# =========================================================================== #
+def page_dataset():
+    ui.page_intro("The dataset", "What is in the scenario set, and where the error concentrates.", "The data")
+    st.page_link(P["sources"], label="Where it comes from →")
+    d = st.session_state.get("dataset")
+    if not d or d.get("df") is None or len(d["df"]) == 0:
+        ui.callout("No dataset has been generated in this session, so there is nothing to "
+                   "show here. Generate one on Simulator → Make a dataset and it appears "
+                   "on this page.", "No dataset yet", "info")
+        st.page_link(P["sim_dataset"], label="Make a dataset →")
+        return
+    df = d["df"]
+    _cfg = d.get("cfg", {})
+    ui.kpi_row([("Scenarios", f"{len(df):,}"),
+                ("With more than one peak", f"{int((df['local_peak_count'] > 1).sum()):,}"),
+                ("Largest loss to shade", f"{df['power_loss_percent'].max():.1f}%")])
+    hd = st.columns([4, 1.4], vertical_alignment="center")
+    hd[0].caption(f"Module {_cfg.get('module', '—')} · {_cfg.get('n_sub', '—')} substrings · "
+                  f"seed {_cfg.get('seed', '—')} · objects sampled: "
+                  f"{', '.join(_cfg.get('objects', [])) or '—'}")
+    try:
+        hd[1].download_button("Download (.zip)",
+                              sim.build_dataset_zip(df, d["curves"], _cfg, d["stats"],
+                                                    d.get("ds") or sim.current_ds()),
+                              "pv_partial_shading_dataset.zip", "application/zip",
+                              key="dl_dataset_datapage", use_container_width=True)
+    except Exception as _e:
+        hd[1].button("Download (.zip)", disabled=True, use_container_width=True,
+                     help=f"Export unavailable: {_e}")
+    a, b = st.columns(2, gap="large")
+    with a:
+        fig = go.Figure(go.Histogram(x=df["gmpp_voltage_V"], nbinsx=40,
+                                     marker_color=ui.METHOD_COLORS["Model only"]))
+        ui.style_fig(fig, 320, "Scenarios", "Voltage of the true peak (V)")
+        fig.update_layout(title="Where the tallest peak sits")
+        ui.show_chart(fig)
+        ui.legend_note("Clusters, not one bump: the peak sits near a strip boundary.")
+    with b:
+        fig = go.Figure()
+        for objname, g in df.groupby("shading_object"):
+            fig.add_trace(go.Scatter(x=g["reduction_percent"], y=g["power_loss_percent"],
+                                     mode="markers", name=objname, marker=dict(size=6, opacity=0.7)))
+        ui.style_fig(fig, 320, "Power lost to shade (%)", "Light blocked (%)")
+        fig.update_layout(title="Loss against how dark the shadow is")
+        ui.show_chart(fig)
+    ui.engine_badge("simplified")
+
+
+def page_sources():
+    c = ui.T()
+    ui.page_intro("Where it comes from",
+                  "From a laboratory measurement to the figure on screen — and what the numbers cannot tell you.",
+                  "The data")
+    st.page_link(P["dataset"], label="← The dataset")
+
+    # Which page is drawn by which engine, and where each input comes from.
+    with st.container(border=True):
+        st.markdown(_bh("The two engines"), unsafe_allow_html=True)
+        rows = [
+            ("Validated engine", "gmppt.device + pvlib CEC parameters",
+             "Explore · The panels, Inside a panel; all of Testing",
+             "Research and benchmark analysis. Matched to ~1% against 616 laboratory "
+             "flash tests."),
+            ("Interactive simulator", "app.py single-diode + per-substring bypass",
+             "Simulator · Set up a panel, Make a dataset, The dataset",
+             "Exploratory configuration and visualisation. Not a benchmark result; "
+             "reverse-bias avalanche is not modelled."),
+        ]
+        cells = "".join(
+            f"<span style='font-weight:600;color:{c['text']}'>{n}</span>"
+            f"<span class='bmono' style='font-size:11.5px'>{code}</span>"
+            f"<span style='font-size:12.5px'>{where}</span>"
+            f"<span style='font-size:12.5px;color:{c['text_muted']}'>{why}</span>"
+            for n, code, where, why in rows)
+        st.markdown(
+            f"<div style='margin-top:10px;display:grid;"
+            f"grid-template-columns:1fr 1.2fr 1.3fr 1.8fr;gap:10px 14px;font-size:13px'>"
+            f"<span style='color:{c['text_muted']};font-size:11.5px'>engine</span>"
+            f"<span style='color:{c['text_muted']};font-size:11.5px'>code</span>"
+            f"<span style='color:{c['text_muted']};font-size:11.5px'>used on</span>"
+            f"<span style='color:{c['text_muted']};font-size:11.5px'>what it is for</span>"
+            f"{cells}</div>", unsafe_allow_html=True)
+
+    with st.container(border=True):
+        st.markdown(_bh("Where each input comes from"), unsafe_allow_html=True)
+        st.markdown(
+            "- **Module parameters** — the CEC module database via `pvlib` "
+            "(`retrieve_sam(\"CECMod\")`), pooled into `results/cec_pool.parquet`.\n"
+            "- **Validation modules** — the held-out half of that pool "
+            "(`gmppt.scenarios.split_modules`). The panel dropdown on Explore only offers "
+            "held-out modules, so nothing on screen was used to fit the model.\n"
+            "- **Datasheet modules** — the Simulator's own presets and any numbers you type "
+            "there. These are not CEC modules and are not used for any benchmark.\n"
+            "- **Tracking methods** — P&O (`gmppt.tracking`), incremental conductance "
+            "(`gmppt.trackers`), PSO (`gmppt.pso`), and the learned seed / hybrid "
+            "(`gmppt.model`, `gmppt.hybrid`) loaded from the trained two-stage model.\n"
+            "- **Benchmark profiles** — EN 50530 irradiance ramp sequences "
+            "(`gmppt.dynamic.SEQUENCES`). These are standard ramps, not a sun path.\n"
+            "- **Comparison figures** — the exported runs under `results/phase2/`. When an "
+            "export is missing the page says so rather than substituting an estimate.")
+
+    sim.page_validation()
+
+
+# =========================================================================== #
+# Navigation shell
+#
+# One header (ui.app_header), one footer (ui.footer_nav), rendered by a single
+# wrapper that every page goes through. No page draws its own chrome, so a page
+# cannot disagree with the rest of the app about where the user is.
+# =========================================================================== #
+_PAGE_FUNCS = {
+    "home": (page_home, "Home", "home"),
+    "panels": (page_panels, "The panels", "panels"),
+    "inside": (page_inside, "Inside a panel", "panel"),
+    "system": (None, "Whole system", "system"),          # None = greyed "· coming"
+    "run": (page_run, "Watch one run", "run"),
+    "compare": (page_compare, "Compare methods", "compare"),
+    "moving": (page_moving, "Dynamic irradiance", "dynamic-irradiance"),
+    "relocation": (page_relocation, "Shading relocation", "relocation"),
+    "results": (page_results, "Results vs targets", "results"),
+    "benchset": (page_benchset, "Benchmark scenario set", "benchmark-set"),
+    "sources": (page_sources, "Where it comes from", "sources"),
+    "sim_setup": (page_sim_setup, "Set up a panel", "simulator"),
+    "sim_saved": (page_sim_saved, "Saved scenarios", "saved"),
+    "sim_dataset": (page_sim_dataset, "Make a dataset", "make-dataset"),
+    "dataset": (page_dataset, "Sandbox dataset", "data"),
+}
+
+# Section order = the order a reader walks the work. "Whole system" is in the
+# Explore list so it shows as "· coming", but it is not in STEPS, so it never
+# inflates the step count with a page that has nothing on it.
+SECTION_KEYS = {
+    "Explore": ["panels", "inside", "system"],
+    "Testing": ["run", "compare", "moving", "relocation", "results"],
+    "The data": ["benchset", "sources"],
+    "Sandbox": ["sim_setup", "sim_saved", "sim_dataset", "dataset"],
+}
+# The sequence the footer walks: Explore → Testing → The data. The Sandbox is a
+# separate engine and is deliberately outside the count.
+_FLOW = ["panels", "inside", "run", "compare", "moving", "relocation", "results",
+         "benchset", "sources"]
+_SANDBOX_FLOW = ["sim_setup", "sim_saved", "sim_dataset", "dataset"]
+
+_NEXT_WHY = {
+    "panels": "You have a scenario. Look at why its curve has more than one peak.",
+    "inside": "You know why the peaks are there. Watch each method try to find the tallest.",
+    "run": "One curve proves nothing on its own. See every method on every shaded case.",
+    "compare": "Now see whether it holds while the irradiance changes.",
+    "moving": "A ramp barely moves the peak. See what happens when the peak jumps.",
+    "relocation": "You have seen every experiment. Read them against the funded targets.",
+    "results": "Every number rests on a scenario set. See what is in it.",
+    "benchset": "And where each of its inputs came from.",
+    "sim_setup": "Keep a curve to compare against later.",
+    "sim_saved": "Or generate thousands of scenarios like it.",
+    "sim_dataset": "Then look at what you generated.",
+}
+
+# Widget keys that must survive a page change (R2). Streamlit deletes a widget's
+# key on any run that does not render it, which in a multipage app is every run
+# spent on another page.
+_PERSIST_KEYS = [
+    "gm_panel", "gm_obj2", "gm_runs", "gm_edge", "gm_shaded_ids", "gm_sel",
+    "gm_showuns", "gm_pv", "gm_vop", "gm_rows", "gm_per", "gm_mount",
+    "gm_depth2", "gm_width", "gm_G2", "gm_T2",
+    "run_overlay", "mv_scen", "mv_show", "mv_mode", "saved_pick", "day_time",
+    "bench_preset", "bench_nsub", "bench_mstr", "bench_pstr", "bench_obj",
+    "bench_baseG", "bench_T", "bench_scen_name",
+] + [f"bench_{f}" for f in sim.DS_FIELDS]
+_PERSIST_PREFIXES = ("bench_s", "day_win_", "day_mot_", "swp_")
+
+
+def _step_of(key):
+    if key in _FLOW:
+        return _FLOW.index(key) + 1, len(_FLOW), _FLOW
+    if key in _SANDBOX_FLOW:
+        return _SANDBOX_FLOW.index(key) + 1, len(_SANDBOX_FLOW), _SANDBOX_FLOW
+    return None, None, None
+
+
+def _make_page(key):
+    fn, title, url = _PAGE_FUNCS[key]
+
+    def _wrapped():
+        ui.app_header({k: P.get(k) if _PAGE_FUNCS[k][0] else None for k in _PAGE_FUNCS},
+                      SECTION_KEYS, key)
+        if key in SECTION_KEYS["Sandbox"]:
+            st.markdown('<div class="gm-sandbox"><b>Sandbox · simplified engine</b>'
+                        '<span>Exploratory configuration and visualisation. Nothing here '
+                        'is a benchmark result.</span></div>', unsafe_allow_html=True)
+        fn()
+
+        step, total, flow = _step_of(key)
+        if flow:
+            i = flow.index(key)
+            prev_key = flow[i - 1] if i > 0 else "home"
+            next_key = flow[i + 1] if i + 1 < len(flow) else None
+            ui.footer_nav(P.get(prev_key), P.get(next_key) if next_key else None,
+                          step, total, _NEXT_WHY.get(key, ""))
+
+    _wrapped.__name__ = f"page_{key}"
+    return st.Page(_wrapped, title=title, url_path=url, default=(key == "home"))
+
+
+def _resend_notice():
+    """Shown on Watch one run ONLY when the draft has diverged from what is running.
+
+    The always-on scenario bar was removed. This is not a status line: it appears
+    only when Explore has been edited since the scenario was sent, which is the
+    one case where the page would otherwise be showing a curve the user thinks
+    they have already changed.
+    """
+    draft = st.session_state.get("scenario_draft")
+    sent = st.session_state.get("scenario_sent")
+    if not (draft and sent) or draft.get("hash") == sent.get("hash"):
+        return
+    a, b = st.columns([5, 1.2], vertical_alignment="center")
+    with a:
+        ui.callout(f"The scenario running here is “{sent.get('label', 'the sent one')}”. "
+                   f"You have since edited The panels to “{draft.get('label', 'something else')}” "
+                   f"without sending it.", "Edited since sent", "caveat")
+    if b.button("Resend", key="run_resend", use_container_width=True,
+                help="Run the scenario you are now editing on The panels."):
+        st.session_state["scenario_sent"] = dict(draft)
+        st.toast("Resent the scenario you are editing.")
+        st.rerun()
+
+
+for _k in _PAGE_FUNCS:
+    if _PAGE_FUNCS[_k][0] is not None:
+        P[_k] = _make_page(_k)
+
+SECTIONS = {"": [P["home"]]}
+for _sec, _keys in SECTION_KEYS.items():
+    SECTIONS[_sec] = [P[k] for k in _keys if k in P]
+
+ui.persist_widget_state(_PERSIST_KEYS, _PERSIST_PREFIXES)
+
+# Built-in nav hidden — ui.app_header is the visible one, on every page.
+nav = st.navigation(SECTIONS, position="hidden")
+nav.run()

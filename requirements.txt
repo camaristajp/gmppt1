@@ -9,3 +9,4 @@ matplotlib==3.11.1
 pytest==8.4.2
 streamlit
 plotly
+scikit-learn==1.8.0

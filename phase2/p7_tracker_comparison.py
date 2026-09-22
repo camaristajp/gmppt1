@@ -1,12 +1,37 @@
 """
 p7_tracker_comparison.py  --  P2.7: the trackers, side by side.
-REVISION 2 -- follows hybrid.py revision 3 (D16); import hack removed.
+REVISION 3 -- selectable module split (train/val); validation run is reportable.
 
 PLACE THIS FILE AT:   C:\\Users\\user\\gmppt\\phase2\\p7_tracker_comparison.py
-                      OVERWRITE revision 1.
+                      OVERWRITE revision 2.
 
 RUN FROM THE REPO ROOT (C:\\Users\\user\\gmppt):
-    python phase2\\p7_tracker_comparison.py
+    python phase2\\p7_tracker_comparison.py                 # training modules (design check)
+    python phase2\\p7_tracker_comparison.py --split val     # validation modules (REPORTABLE)
+
+WHAT CHANGED IN REVISION 3
+    A --split argument selects the module set the comparison runs on:
+
+        train  (default)  the seeded training-module set, scenario_set(n) -- a
+                          design check, exactly as revisions 1-2 ran. Default so
+                          nothing that referenced the old behaviour changes.
+        val               scenarios drawn from the held-back VALIDATION modules,
+                          via scenarios_for_modules(split.val, n) -- the same
+                          mechanism p3_final_comparison.py Part A uses. THIS is
+                          the reportable tracker comparison the thesis and papers
+                          cite; the training run never was (it reuses modules the
+                          model selection saw).
+
+    The HELD-OUT (test) split is deliberately NOT reachable here. It is opened
+    only through p3_final_comparison.py --confirm-test, which ledgers every
+    opening (test_openings.json) and budgets the count. Letting this runner open
+    it would be an unledgered access to the one set whose independence the whole
+    project protects. Arrival/worst-case on validation is what becomes citable;
+    the held-out generalisation figure stays p3's single, counted measurement.
+
+    Reference baseline numbers quoted below (P&O 42.1%, etc.) were measured on
+    training modules; the validation run will differ in the second digit. The
+    CRITERIA are module-independent and unchanged.
 
 WHAT CHANGED IN REVISION 2
     hybrid.py revision 3 renamed the private alias _seed_voltage to
@@ -86,10 +111,12 @@ EXPECTED BEFORE THE RUN
     escapes local peaks where P&O does not, one implementation is wrong.
 
 SCOPE
-    Training-module scenarios: a design check, NOT a reportable comparison. The
-    reportable table runs on validation modules; the held-out split has been
-    opened twice and is budgeted for one further opening. All simulated;
-    multi-peak magnitude at full module scale awaits partner measurement.
+    Default (--split train): training-module scenarios, a design check, NOT
+    reportable. With --split val the SAME comparison runs on validation modules
+    and IS reportable. The held-out split is not reachable here; it is opened
+    only through p3_final_comparison.py, which ledgers and budgets each opening.
+    All simulated; multi-peak magnitude at full module scale awaits partner
+    measurement.
 """
 
 from __future__ import annotations
@@ -101,7 +128,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from gmppt import config  # noqa: E402
+from gmppt import config, dataset  # noqa: E402
 from gmppt.harness import scenario_set  # noqa: E402
 from gmppt.hybrid import (SEED_PROBE_COST, _po_from, make_hybrid,  # noqa: E402
                           make_seed_only, seed_voltage)
@@ -118,6 +145,27 @@ MIN_REACHED_MULTI_PCT = 90.0
 MIN_STEADY_MULTI_PCT = 99.0
 MIN_REACHED_GAIN_PT = 0.5
 MIN_WORST_GAIN_FRAC = 0.10
+
+
+def scenarios_for_modules(modules: list[str], n_target: int,
+                          oversample: int = 6) -> list:
+    """Scenarios restricted to a given module set.
+
+    Copied verbatim from p3_final_comparison.py so the validation run here draws
+    from the SAME mechanism as the region/seed comparison, keeping the two tables
+    comparable. train_only=False so the validation modules -- held back from the
+    training pool -- are reachable.
+    """
+    from gmppt import scenarios as scen
+    want = set(modules)
+    out = []
+    raw = scen.generate(dataset.pool(), n_target * oversample, train_only=False)
+    for sc in raw:
+        if str(sc.module) in want:
+            out.append(sc)
+            if len(out) >= n_target:
+                break
+    return out
 
 
 def _oracle(traj, temp_c=None, n_steps=N_STEPS, **_):
@@ -168,9 +216,13 @@ def clamp_would_bind(scenarios, model) -> tuple[int, int]:
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--n", type=int, default=200)
+    ap.add_argument("--split", choices=("train", "val"), default="train",
+                    help="train = scenario_set (design check); "
+                         "val = validation modules (reportable). The held-out "
+                         "split is reachable only via p3_final_comparison.py.")
     args = ap.parse_args()
 
-    print("P2.7  tracker comparison: P&O, InC, seed, hybrid  (revision 2)")
+    print("P2.7  tracker comparison: P&O, InC, seed, hybrid  (revision 3)")
     try:
         print("  " + config.provenance())
     except Exception:
@@ -196,8 +248,15 @@ def main() -> int:
         print("model 'c3_two_stage_full' not found.")
         return 1
 
-    scenarios = scenario_set(args.n)
-    print(f"{len(scenarios)} scenarios (training modules; design check)")
+    if args.split == "val":
+        split = dataset.module_split()
+        print(f"modules: {split.summary()}")
+        scenarios = scenarios_for_modules(split.val, args.n)
+        print(f"{len(scenarios)} scenarios on VALIDATION modules "
+              f"(REPORTABLE comparison)")
+    else:
+        scenarios = scenario_set(args.n)
+        print(f"{len(scenarios)} scenarios (training modules; design check)")
 
     runs = [
         ("oracle [not buildable]", _oracle),
@@ -313,13 +372,19 @@ def main() -> int:
         print("\n   Does NOT clear the declared bar. Diagnose before PSO.")
 
     OUT.mkdir(parents=True, exist_ok=True)
-    (OUT / "tracker_comparison.json").write_text(
-        json.dumps({"results": results, "clamp_left": n_left,
-                    "n_scenarios": len(scenarios)}, indent=2, default=float),
+    out_name = f"tracker_comparison_{args.split}.json"
+    (OUT / out_name).write_text(
+        json.dumps({"split": args.split, "results": results,
+                    "clamp_left": n_left, "n_scenarios": len(scenarios)},
+                   indent=2, default=float),
         encoding="utf-8")
-    print(f"\nresults -> {OUT / 'tracker_comparison.json'}")
-    print("PSO remains gated on its declared cost mapping.")
-    print("All figures simulated, on training modules.")
+    print(f"\nresults -> {OUT / out_name}")
+    print("PSO convergence is compared in p9_pso_comparison.py.")
+    if args.split == "val":
+        print("Figures on VALIDATION modules -- reportable. The held-out")
+        print("generalisation figure stays p3's single, counted measurement.")
+    else:
+        print("All figures simulated, on training modules (design check).")
     return 0
 
 

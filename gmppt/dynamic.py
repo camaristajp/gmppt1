@@ -223,17 +223,17 @@ VALIDATION_BAND_PCT = (85.0, 100.0)
 # at all. Treat as a swept parameter.
 CONTROL_PERIOD_S = 0.1
 
-# Uniform time compression per sequence, so a profile fits a simulation budget.
-# Applied EQUALLY to every slope in a sequence, so the ratio between slopes --
-# which is what the test measures -- is preserved exactly. Compressing only the
-# slow slopes would flatten the very difference being measured.
-# Sequence A's slowest ramp is 800 s (8 000 steps at 100 ms), hence 10x.
-# Time compression was introduced to fit profiles into a simulation budget under
-# the mistaken belief that step count drives cost. It does not -- simulator calls
-# scale with BLOCK count, and the trajectory loop is interpolation. Compression
-# therefore bought nothing and made Sequence A's ramps 10x steeper than the
-# standard specifies (5-500 W/m2/s against a specified 0.5-50), which is what
-# made its block-convergence check diverge. Removed.
+# Uniform time compression per sequence. SET TO 1.0 EVERYWHERE -- i.e. OFF.
+# History (recorded, not silently corrected -- defect D20): compression was
+# introduced to fit profiles into a simulation budget, under the mistaken belief
+# that control-step count drives simulator cost. It does not -- simulator calls
+# scale with BLOCK count, and the trajectory loop is interpolation, so
+# compression bought nothing. When applied it was applied EQUALLY to every slope
+# in a sequence, preserving the slope ratio the test measures; but at its former
+# 10x on Sequence A it made that sequence's ramps 10x steeper than the standard
+# specifies (5-500 W/m2/s against a specified 0.5-50), the probable cause of
+# Sequence A's block-convergence divergence. Now 1.0 for every sequence.
+# Sequence B was always 1.0, so its 99.833% figure is unaffected either way.
 TIME_COMPRESSION = {"10-50": 1.0, "30-100": 1.0, "1-10": 1.0}
 
 # t0 is a WAITING period before the measured cycles begin. Simulated so the

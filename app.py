@@ -1780,7 +1780,8 @@ def page_dataset_generator(ds, topo, base_G, T_c):
         st.download_button("⬇️ Download dataset (.zip)",
                            build_dataset_zip(dstate["df"], dstate["curves"], dstate["cfg"],
                                              stt, ds),
-                           "pv_partial_shading_dataset.zip", "application/zip")
+                           "pv_partial_shading_dataset.zip", "application/zip",
+                           key="dl_dataset_generate")
         st.caption("Browse individual scenarios under **🖼️ Gallery → Generated dataset**.")
 
 
@@ -2072,7 +2073,8 @@ def render_dataset_section():
             st.download_button("⬇️ Download dataset (.zip)",
                                build_dataset_zip(d["df"], d["curves"], d["cfg"],
                                                  d["stats"], current_ds()),
-                               "pv_partial_shading_dataset.zip", "application/zip")
+                               "pv_partial_shading_dataset.zip", "application/zip",
+                               key="dl_dataset_export")
             st.caption("scenarios.csv · curves.npz · configuration.json · README.txt")
 
 

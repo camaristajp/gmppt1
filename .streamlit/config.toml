@@ -1,10 +1,22 @@
-# Base theme = light so every native widget (inputs, selects, segmented nav,
-# sidebar) renders as a proper light control. Dark mode is applied on top via
-# CSS from the in-app theme toggle.
+# GMPPT Bench — Streamlit theme. Put this folder next to gmppt_app.py.
+# Widget accents (sliders, toggles, selected pills, multiselect chips) come from here;
+# everything else is styled by gmppt_ui.setup().
+
+[client]
+toolbarMode = "minimal"
+showSidebarNavigation = false
+
 [theme]
 base = "light"
-primaryColor = "#12306B"            # AI Lab navy (brand / active / primary action)
-backgroundColor = "#F8FAFC"         # page: very light cool gray
-secondaryBackgroundColor = "#FFFFFF" # sidebar / cards / inputs: white
-textColor = "#0F172A"               # dark navy/charcoal primary text
-font = "sans serif"
+primaryColor = "#16616B"
+backgroundColor = "#F7F6F1"
+secondaryBackgroundColor = "#F0EDE4"
+textColor = "#15181B"
+borderColor = "#E3DFD4"
+showWidgetBorder = true
+baseRadius = "0.6rem"
+linkColor = "#16616B"
+font = "IBM Plex Sans:https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&display=swap"
+headingFont = "Plus Jakarta Sans:https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@600;700;800&display=swap"
+codeFont = "IBM Plex Mono:https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&display=swap"
+chartCategoricalColors = ["#16616B", "#A32B24", "#7FA5A8", "#9BBDBF", "#8A9098", "#B5641A"]
