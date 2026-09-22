@@ -323,6 +323,23 @@ def _inject_css(c: dict) -> None:
         font-size: 0.82rem; margin-bottom: 10px; }}
     .gm-sandbox b {{ font-family: {FONTS['mono']}; font-size: 0.68rem; letter-spacing: 0.06em;
         text-transform: uppercase; }}
+    .gm-animbadge {{ display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap;
+        padding: 6px 11px; border-radius: {RADIUS['md']}; font-size: 0.78rem;
+        margin-bottom: 8px; border: 1px solid {c['border']}; background: {c['surface_alt']};
+        color: {c['text_body']}; }}
+    .gm-animbadge b {{ font-family: {FONTS['mono']}; font-size: 0.66rem; letter-spacing: 0.06em;
+        text-transform: uppercase; padding: 2px 8px; border-radius: {RADIUS['pill']}; }}
+    .gm-animbadge.ok b {{ background: {c['teal_tint']}; color: {c['teal']}; }}
+    .gm-animbadge.warn b {{ background: {c['amber_tint']}; color: {c['amber_text']}; }}
+    .gm-animbadge.mute b {{ background: {c['muted_fill']}; color: {c['text_muted']}; }}
+    .gm-animbadge .detail {{ font-family: {FONTS['mono']}; font-size: 0.7rem;
+        color: {c['text_muted']}; }}
+    /* Plotly's own play/pause and slider must stay visible and keyboard-reachable */
+    .js-plotly-plot .updatemenu-container, .js-plotly-plot .slider-container {{
+        display: block !important; }}
+    @media (prefers-reduced-motion: reduce) {{
+        .gm-hero-anim, .gm-hero-anim * {{ animation: none !important; }}
+    }}
     .gm-notbuilt {{ border: 1px dashed {c['border_strong']}; border-radius: {RADIUS['lg']};
         padding: 16px 18px; color: {c['text_muted']}; background: {c['surface_alt']}; }}
     .gm-notbuilt b {{ color: {c['text_body']}; }}
@@ -499,6 +516,13 @@ def app_header(pages: dict, sections: dict, current: str, routes: dict | None = 
             st.space("stretch")
             if routes and current in routes:
                 st.html(f'<span class="gm-route">{_e(routes[current])}</span>', width="content")
+            # Animations On/Off sits beside the theme control (§6). Off is a real
+            # setting, not a preference hint: the pages build no Plotly frames at
+            # all and fall back to their snapshot strips.
+            st.html('<span class="gm-route" style="padding-right:6px">Animations</span>',
+                    width="content")
+            st.segmented_control("Animations", ["On", "Off"], key="gm_anim",
+                                 label_visibility="collapsed")
             st.segmented_control("Theme", ["Light", "Dark"], key=theme_key, label_visibility="collapsed")
         if cur_sec:
             with st.container(horizontal=True, gap=None, key="gm-hdr-tabs"):
@@ -536,9 +560,9 @@ def persist_widget_state(keys: Iterable[str] = (), prefixes: Iterable[str] = ())
 def provenance(exports: Mapping[str, Mapping]) -> None:
     """Stamp under every figure that came from a harness export.
 
-    exports: {filename: {"path": str|Path|None, "split":…, "n":…, "seed":…,
-                         "version":…}}. Missing fields are simply not shown —
-    never filled in with a guess.
+    exports: {filename: {"path": str|Path|None, "experiment":…, "split":…,
+                         "n":…, "seed":…, "version":…}}. Missing fields are
+    simply not shown — never filled in with a guess.
     """
     if not exports:
         return
@@ -553,7 +577,7 @@ def provenance(exports: Mapping[str, Mapping]) -> None:
                 bits.append(ts.strftime("%Y-%m-%d %H:%M"))
         except Exception:
             pass
-        for label, key in (("split", "split"), ("n", "n"),
+        for label, key in (("experiment", "experiment"), ("split", "split"), ("n", "n"),
                            ("seed", "seed"), ("version", "version")):
             v = meta.get(key)
             if v not in (None, ""):
@@ -648,6 +672,259 @@ def footer_nav(prev_page, next_page, step: int | None, total: int | None,
 
 def _prev_title(page) -> str:
     return getattr(page, "title", str(page))
+
+
+# --------------------------------------------------------------------------- #
+# Animation toolkit (Update 3 §5.2)
+#
+# One player, used by every animation. The rules it enforces so callers cannot
+# break them: a badge always states what kind of thing the animation is; motion
+# is Plotly `frames` driven in the browser, never st.rerun; and when animations
+# are off the caller gets a static snapshot strip with the same information.
+# --------------------------------------------------------------------------- #
+ANIM_MAX_FRAMES = 300
+ANIM_MAX_JSON_MB = 5.0
+
+_BADGE_TEXT = {
+    "recorded": "Recorded playback — harness export. Nothing here is re-run.",
+    "live": ("Live illustration — one scenario on the validated engine. Explains "
+             "behaviour; not a benchmark result."),
+    "schematic": "Schematic — illustrates the idea; not measured data.",
+    "sandbox": "Sandbox — simplified engine. Not a benchmark result.",
+}
+_BADGE_TONE = {"recorded": "ok", "live": "warn", "schematic": "mute", "sandbox": "warn"}
+
+
+def anim_on() -> bool:
+    """The global Animations On/Off switch (§5.2.4). Off => snapshot strips only."""
+    return str(st.session_state.get("gm_anim", "On")) == "On"
+
+
+def anim_badge(kind: str, detail: str = "") -> None:
+    """Exactly one of these sits above every animation, saying what it is."""
+    kind = kind if kind in _BADGE_TEXT else "schematic"
+    tone = _BADGE_TONE[kind]
+    extra = f' <span class="detail">{_e(detail)}</span>' if detail else ""
+    st.markdown(
+        f'<div class="gm-animbadge {tone}"><b>{_e(kind)}</b>'
+        f'<span>{_e(_BADGE_TEXT[kind])}</span>{extra}</div>', unsafe_allow_html=True)
+
+
+def downsample(n: int, key_frames: Iterable[int] = (), max_frames: int = ANIM_MAX_FRAMES):
+    """Indices to keep, and the stride used. Key frames are always kept (§5.0.5).
+
+    Integer arithmetic only — this runs before any figure is built and must not
+    depend on numpy being importable in the caller's context.
+    """
+    if n <= max_frames:
+        return list(range(n)), 1
+    stride = max(1, -(-n // max_frames))          # ceil(n / max_frames)
+    keep = set(range(0, n, stride)) | {n - 1} | {int(k) for k in key_frames if 0 <= k < n}
+    return sorted(keep), stride
+
+
+def _speed_buttons(base_ms: int):
+    """0.5x / 1x / 2x, plus play and pause, as Plotly layout controls."""
+    def play(ms):
+        return dict(label=f"{base_ms / ms:.1f}×".replace(".0×", "×"), method="animate",
+                    args=[None, {"frame": {"duration": ms, "redraw": True},
+                                 "fromcurrent": True,
+                                 "transition": {"duration": 0}}])
+    return [dict(
+        type="buttons", direction="left", x=0, y=1.14, xanchor="left", yanchor="top",
+        showactive=False, pad=dict(r=6, t=4),
+        buttons=[
+            dict(label="▶ Play", method="animate",
+                 args=[None, {"frame": {"duration": base_ms, "redraw": True},
+                              "fromcurrent": True, "transition": {"duration": 0}}]),
+            dict(label="❚❚ Pause", method="animate",
+                 args=[[None], {"frame": {"duration": 0, "redraw": False},
+                                "mode": "immediate",
+                                "transition": {"duration": 0}}]),
+            play(base_ms * 2), play(base_ms), play(max(1, base_ms // 2)),
+        ])]
+
+
+def trace_player(frames: Sequence[dict], series: Mapping[str, Mapping], *,
+                 curve_panel: bool = True, face_panel: bool = False,
+                 timeline: Mapping | None = None, key_frames: Sequence[int] = (),
+                 height: int = 620, view: str = "together",
+                 x_title: str = "terminal voltage  V", y_title: str = "power  W",
+                 static_traces: Sequence = (), frame_ms: int = 120) -> go.Figure:
+    """The one shared player. Returns a figure; the caller renders it.
+
+    Static background (the curve, the GMPP, the substring bands) is drawn ONCE in
+    `static_traces`; frames update only the per-series marker and trail traces.
+    That is what keeps the JSON inside budget — re-embedding an 800-point curve
+    in every frame is what blows it.
+
+    `frames` follows the Update 3 schema; fields a frame omits are not drawn.
+    """
+    fig = go.Figure()
+    for t in static_traces:
+        fig.add_trace(t)
+    n_static = len(fig.data)
+
+    names = list(series)
+    # one marker + one trail trace per series, seeded from the first frame
+    first = frames[0] if frames else {}
+    idx = {}
+    for nm in names:
+        spec = series[nm]
+        trail = (first.get("trails") or {}).get(nm) or []
+        fig.add_trace(go.Scatter(
+            x=[p[0] for p in trail], y=[p[1] for p in trail], mode="lines",
+            line=dict(color=spec.get("color", "#888"), width=1.4, dash="dot"),
+            opacity=0.55, showlegend=False, hoverinfo="skip", name=f"{nm} trail"))
+        mk = (first.get("markers") or {}).get(nm)
+        fig.add_trace(go.Scatter(
+            x=[mk["V"]] if mk else [], y=[mk["P"]] if mk else [], mode="markers",
+            marker=dict(color=spec.get("color", "#888"), size=12,
+                        symbol=spec.get("symbol", "circle"),
+                        line=dict(color="#ffffff", width=1)),
+            name=nm))
+        idx[nm] = (n_static + len(idx) * 2, n_static + len(idx) * 2 + 1)
+
+    order = [i for pair in idx.values() for i in pair]
+    plotly_frames = []
+    for f in frames:
+        data = []
+        for nm in names:
+            trail = (f.get("trails") or {}).get(nm) or []
+            mk = (f.get("markers") or {}).get(nm)
+            data.append(go.Scatter(x=[p[0] for p in trail], y=[p[1] for p in trail]))
+            data.append(go.Scatter(x=[mk["V"]] if mk else [],
+                                   y=[mk["P"]] if mk else []))
+        plotly_frames.append(go.Frame(name=str(f.get("step")), data=data, traces=order))
+    fig.frames = plotly_frames
+
+    steps = [dict(method="animate", label=str(f.get("step")),
+                  args=[[str(f.get("step"))],
+                        {"frame": {"duration": 0, "redraw": True},
+                         "mode": "immediate", "transition": {"duration": 0}}])
+             for f in frames]
+    fig.update_layout(
+        updatemenus=_speed_buttons(frame_ms),
+        sliders=[dict(active=0, x=0, y=-0.02, len=1.0, pad=dict(t=34, b=8),
+                      currentvalue=dict(prefix="control step ", font=dict(size=12)),
+                      steps=steps)])
+    style_fig(fig, height=height, x_title=x_title, y_title=y_title)
+    fig.update_layout(legend=dict(orientation="h", y=1.02, x=0.42))
+    return fig
+
+
+def curve_morph(curves: Sequence[Mapping], labels: Sequence[str], *,
+                marks: bool = True, key_frames: Sequence[int] = (),
+                height: int = 420, frame_ms: int = 220) -> go.Figure:
+    """Frames that change the CURVE rather than a marker on it (A4, A5, A9)."""
+    fig = go.Figure()
+    c0 = curves[0]
+    fig.add_trace(go.Scatter(x=c0["V"], y=c0["P"], mode="lines",
+                             line=dict(color=LIGHT["teal"], width=3), name="P–V"))
+    if marks:
+        g = c0.get("gmpp") or {}
+        fig.add_trace(go.Scatter(x=[g.get("V")], y=[g.get("P")], mode="markers",
+                                 name="true peak",
+                                 marker=dict(symbol="star", size=15,
+                                             color=PEAK_COLORS["gmpp"])))
+    frames = []
+    for i, cur in enumerate(curves):
+        data = [go.Scatter(x=cur["V"], y=cur["P"])]
+        if marks:
+            g = cur.get("gmpp") or {}
+            data.append(go.Scatter(x=[g.get("V")], y=[g.get("P")]))
+        frames.append(go.Frame(name=str(i), data=data,
+                               traces=list(range(len(data))),
+                               layout=dict(title=dict(text=str(labels[i])
+                                                      if i < len(labels) else ""))))
+    fig.frames = frames
+    fig.update_layout(
+        updatemenus=_speed_buttons(frame_ms),
+        sliders=[dict(active=0, x=0, y=-0.02, len=1.0, pad=dict(t=34, b=8),
+                      currentvalue=dict(prefix="frame ", font=dict(size=12)),
+                      steps=[dict(method="animate", label=str(i),
+                                  args=[[str(i)], {"frame": {"duration": 0, "redraw": True},
+                                                   "mode": "immediate",
+                                                   "transition": {"duration": 0}}])
+                             for i in range(len(curves))])])
+    style_fig(fig, height=height, x_title="terminal voltage  V", y_title="power  W")
+    return fig
+
+
+def snapshot_strip(frames: Sequence[dict], key_frames: Sequence[int],
+                   captions: Sequence[str] = (), *, static_traces: Sequence = (),
+                   series: Mapping[str, Mapping] | None = None,
+                   height: int = 240, key: str | None = None) -> None:
+    """Static small multiples of the key frames — the reduced-motion fallback.
+
+    Shown whenever animations are off, and always available under every
+    animation so a still can be lifted straight into a thesis figure.
+    """
+    picks = [k for k in key_frames if 0 <= k < len(frames)] or list(
+        range(0, len(frames), max(1, len(frames) // 3)))[:4]
+    if not picks:
+        return
+    cols = st.columns(len(picks), gap="small")
+    for col, k in zip(cols, picks):
+        f = frames[k]
+        fig = go.Figure()
+        for t in static_traces:
+            fig.add_trace(t)
+        for nm, spec in (series or {}).items():
+            mk = (f.get("markers") or {}).get(nm)
+            if mk:
+                fig.add_trace(go.Scatter(
+                    x=[mk["V"]], y=[mk["P"]], mode="markers", name=nm,
+                    marker=dict(color=spec.get("color", "#888"), size=11,
+                                symbol=spec.get("symbol", "circle"))))
+        style_fig(fig, height=height, x_title="", y_title="")
+        fig.update_layout(showlegend=False, margin=dict(l=30, r=8, t=26, b=26),
+                          title=dict(text=f"step {f.get('step')}", font=dict(size=11)))
+        with col:
+            show_chart(fig, key=f"{key or 'snap'}-{k}")
+            cap = captions[picks.index(k)] if picks.index(k) < len(captions) else ""
+            if cap:
+                st.markdown(f'<div class="gm-legend">{_e(cap)}</div>',
+                            unsafe_allow_html=True)
+
+
+def anim_exports(fig: go.Figure, frames: Sequence[dict], meta: Mapping,
+                 *, key: str, name: str = "animation") -> dict:
+    """HTML + JSON downloads for an animation, and its measured budget (§5.2.6).
+
+    Neither download needs kaleido. Returns the measurement dict so the caller
+    can log frame count, stride, JSON size and build time.
+    """
+    import json as _json
+    payload = {"provenance": dict(meta), "frames": list(frames)}
+    js = _json.dumps(payload, default=str)
+    try:
+        html = fig.to_html(include_plotlyjs="cdn", full_html=True)
+        head = (f"<p style='font-family:sans-serif;font-size:13px'>"
+                f"{_e(str(meta.get('badge', '')))} — {_e(str(meta.get('detail', '')))}</p>")
+        html = html.replace("<body>", "<body>" + head, 1)
+    except Exception as e:                                  # pragma: no cover
+        html = f"<html><body>could not serialise the figure: {_e(str(e))}</body></html>"
+    fig_bytes = len(_json.dumps(fig.to_plotly_json(), default=str).encode())
+    a, b = st.columns(2)
+    a.download_button("Download animation (HTML)", html, f"{name}.html", "text/html",
+                      use_container_width=True, key=f"{key}-html")
+    b.download_button("Download frames (JSON)", js, f"{name}.json", "application/json",
+                      use_container_width=True, key=f"{key}-json")
+    return {"frames": len(frames), "figure_json_bytes": fig_bytes,
+            "figure_json_mb": round(fig_bytes / 1e6, 3)}
+
+
+def anim_budget_note(measured: Mapping, stride: int = 1, build_s: float | None = None):
+    """One mono line under every animation stating what it actually cost."""
+    bits = [f"{measured.get('frames', '—')} frames"]
+    if stride and stride > 1:
+        bits.append(f"showing every {stride}{'nd' if stride == 2 else 'rd' if stride == 3 else 'th'} step")
+    bits.append(f"{measured.get('figure_json_mb', '—')} MB figure JSON")
+    if build_s is not None:
+        bits.append(f"built in {build_s:.2f} s")
+    st.markdown(f'<div class="gm-legend">{_e(" · ".join(bits))}</div>',
+                unsafe_allow_html=True)
 
 
 def show_chart(fig: go.Figure, key: str | None = None, **kwargs):

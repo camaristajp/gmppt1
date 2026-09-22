@@ -1,5 +1,81 @@
 # CHANGELOG — dashboard revision
 
+## Workflow audit + Update 3 (animation layer, first tranche)
+
+### Defects found by the §2 audit
+
+| # | Defect | Where | Fix | Verified |
+|---|--------|-------|-----|----------|
+| 1 | **Loading a saved scenario crashed the page.** Phase B's R6 change widened the bench run signature to 7 fields, but `_bench_load` still wrote 4, so the unpack raised `ValueError: not enough values to unpack (expected 7, got 4)`. Two derivations of one quantity, in two places. | `_bench_load`, `page_sim_setup` | One builder, `_bench_sig()`, used by both writers; `_bench_ran()` discards a stale shape instead of raising, so a restored session degrades to the empty state. | `test_bench_run_signature_has_exactly_one_builder`, browser round trip |
+| 2 | **`bench_save` (a button) was being pre-set from session state.** The persistence prefix `"bench_s"` matched `bench_save` and `bench_scen_name`. Streamlit raises `StreamlitValueAssignmentNotAllowedError` at *widget creation*, which the try/except inside `persist_widget_state` cannot catch. Masked by defect 1 until that was fixed. | `_PERSIST_PREFIXES` | The per-substring inputs are listed explicitly (`bench_s0…bench_s11`); the broad prefix is gone. | `test_persist_prefixes_never_match_a_button_key` |
+
+Everything else in the §2 checklist passed. Three further audit failures were harness artifacts, confirmed separately: the divergence state does fire when the control change is verified; the Inside-a-panel slider **is** bounded to Voc (tick bar reads `0.00 41.30`); and Your day is badged and reads the day events.
+
+### Update 3 — toolkit and A1
+
+| Item | What | Verified |
+|------|------|----------|
+| Toolkit | `ui.trace_player`, `ui.curve_morph`, `ui.anim_badge`, `ui.snapshot_strip`, `ui.anim_exports`, `ui.anim_on`, `ui.downsample`, `ui.anim_budget_note`. Static background (curve, GMPP, bands) is drawn once and frames update only the marker/trail traces — that is what keeps the JSON small. | `test_toolkit_exists_with_the_specified_api`, T34 |
+| §6 toggle | `gm_anim` (default On) in `ui.app_header` beside the theme control, persisted. Off builds **no** Plotly frames and renders the snapshot strip. | T33 (1 figure on → 4 off, 0 frames) |
+| **A1** | Search replay on Watch one run. Replays `v_hist`/`p_hist` from `_run_scenario`; no tracker is re-run. Play/pause, 0.5×/1×/2×, step slider, per-method control-step and %-of-GMPP counters, trail, key frames, HTML/JSON export, generated text alternative. | T25, T26, T31, T33, T34, T35, T36 |
+
+**A1 measured:** 60 frames · stride 1 · **0.238 MB** figure JSON · build **<0.01 s** (frames are list slicing over already-cached trajectories; the expensive `_run_scenario` is cached separately).
+
+**PSO grouping (T26):** recoverable. `pso.py:183-187` is a fixed-order nest, `DEFAULT_POPULATION = 5`, so evaluation *k* is particle `k % 5` of iteration `k // 5`. `_pso_grouping()` re-checks the loop shape at runtime and falls back to "sequential evaluations — particle identity not recorded" if it ever changes.
+
+**Not yet built:** A2–A9. See the report for what each needs.
+
+
+## Phase A — Protect the data (consolidated update, Part 8)
+
+| ID | What changed | Where | Verified | Residual risk |
+|----|--------------|-------|----------|---------------|
+| **§2.3 read-only** | Audited every write path in `gmppt_app.py` and `app.py`. Every `to_csv` / `savemat` / `writestr` is an in-memory download or zip buffer; nothing writes under `results/`. Asserted, not assumed. | — | T16, `test_T16_dashboard_never_writes_to_phase2` | None. |
+| **§2.3 mirror** | The earlier revision deleted `_set_scenario` and with it the `current_scenario.json` mirror. Restored as `_mirror_scenario()`, writing to **`results/dashboard/`** so a dashboard artefact cannot sit beside a benchmark export. Written on Send only; failure is swallowed so losing the mirror cannot take a page down. | `_mirror_scenario`, `_send_scenario` | Phase A (mirror present, correct directory, carries the scenario) | Only the sent scenario is mirrored, not the draft — matching the original behaviour. |
+| **§2.3 four failure modes** | `_load_json` returned `None` for everything. `_read_export` now distinguishes **not found / unreadable / malformed JSON / unexpected schema**, and `missing_export` re-probes the path so the message fits: a missing file gets "run it and reload", a truncated one gets "present but malformed JSON — the dashboard will not repair or regenerate it". | `_read_export`, `missing_export` | Phase A (all three fixtures), `test_export_reader_separates_missing_from_malformed` | None. |
+| **§2.3 schema gate** | `require_keys()` added and wired into Compare, Dynamic, Relocation, Results and Benchmark set. A file that parses but has moved shape now says which top-level key is absent and that nothing is inferred from the fields that remain, instead of falling through to a KeyError or an empty table. | `require_keys` + 6 call sites | Phase A (unexpected-schema fixture), `test_pages_check_export_schema_before_reading_it` | Top-level keys only; nested schema drift still surfaces as `missing_field`. |
+| **U7 experiment id** | `ui.provenance` now renders `experiment=…`. `_experiment_id()` prefers a real `experiment_id`/`run_id`/`uuid`; these exports carry none, so it falls back to the fields that do identify the run (`family`, `sequence`). It never synthesises one. | `ui.provenance`, `_experiment_id`, `_export_meta` | Phase A, `test_provenance_carries_an_experiment_id`, `test_experiment_id_is_read_not_invented` | **Protected-file request:** no export writes an explicit run id. The test fails loudly if one is added, so the better field gets used. |
+
+**Phase A tests:** pytest 28/28 · Phase A browser suite 23/23 · prior suites 20/20 and 10/10 · all 14 pages render with exports present, absent, malformed and wrong-shaped.
+
+## Phase C — Module sets and metrics (consolidated update, Part 8)
+
+R11, R14+U8, R15 and R16 were already implemented and passing; Phase C adds U1 and U6.
+
+| ID | What changed | Where | Verified | Residual risk |
+|----|--------------|-------|----------|---------------|
+| **U1.1 dropdown** | Already on `dataset.module_split().val`, with the original N_s/power-band/median selection applied to that set. Verified, not redone. | `_validation_modules` | T14 | None. |
+| **U1.2 demo module** | The demo was the median-power 72-cell validation module. It is now the deterministic choice U1 specifies: among validation modules with `N_s == 72` and 340–380 W, the one whose **nearest training module is farthest away** in z-scored `V_mp_ref, I_mp_ref, V_oc_ref, I_sc_ref, N_s` over the full pool. Chosen: **`LG_Electronics_Inc__LG370S2W_A5`**, nearest training module `Auxin_Solar_AXN6M612T375` at z-distance **0.17**. Logged at startup and shown on Watch one run. Irradiance and temperature unchanged. | `_demo_module`, `_zmatrix`, `_nearest_train`, `_demo_startup_log` | T14 (6 checks incl. an independent re-computation) | The best available separation in that band is 0.17 — small, because the split is by module name and near-identical products straddle it. The number is shown rather than hidden. |
+| **U1.3 load-time assertion** | `assert_val_modules()` gates the panel dropdown and the demo. A module in train or test renders a `limit` callout and **no results** on that page. | `assert_val_modules`, `page_panels`, `page_run` | T14, `test_T14_load_time_assertion_exists_and_blocks_rendering` | None. |
+| **U1.4 test set unreachable** | No call to `split_modules()` and no `.test` read anywhere. Enforced on the **AST**, not by grep — the Sources page legitimately names `scenarios.split_modules(pool)[1]` in prose to explain what the test set is, and a text search cannot tell that from a call. | — | `test_T14_test_split_is_never_reached` | None. |
+| **U1.5 unseen check** | Panel beside the dropdown: split summary (`train 13,406 · val 3,351 · test 4,189 (test not shown here)`), **In training set: No** from a live membership test, and **closest module the model was trained on** with its distance, computed live. | `_unseen_check`, `_split_counts`, `_nearest_train` | T14 | Verifies against the split function, not a training list in the model file — stated on screen and raised as a protected-file request. |
+| **U1.6 wording** | `_VAL_WORDING` used wherever the dashboard describes these modules. "Held-out" now appears only where it names the **test** set; "never seen" appears nowhere. A test walks every non-comment line to keep it that way. | `_VAL_WORDING` and call sites | `test_T14_wording_never_calls_validation_modules_held_out` | None. |
+| **U1.7 Sources** | "the held-out half of that pool (`split_modules`)" replaced by the three-way split with live counts, the function names, and an explicit line that the test set is reached only through `p3_final_comparison.py --confirm-test` and never here. | `page_sources` | T14 | None. |
+| **U6 unknown variants** | `method_label` fell back to echoing the key, so an unrecognised export key would print as itself and read like a method name. It now returns **"Unknown variant — export schema needs review"**. Compare also *surfaces* unknown keys as their own rows plus a caveat naming them, rather than silently dropping rows the export contains. | `method_label`, `UNKNOWN_VARIANT`, `page_compare` | T15 (fixture injects `hybrid, experimental`) | The cost chart omits unknown rows by design — an unknown variant has no readings figure to place on a readings axis. |
+
+**Phase C tests:** pytest 41/41 · Phase C browser 23/23.
+
+**Protected-file requests (U1.8), reported not done:** (1) write each export's module list into the export JSON; (2) save `split.train` inside the model file. Until both exist, the unseen check verifies against the split function rather than against what the model was actually fitted on, and the panel says so.
+
+## Phase B — State (consolidated update, Part 8)
+
+R1–R10 and U9 were already implemented and passing (see the sections below); Phase B adds U3 and U4.
+
+| ID | What changed | Where | Verified | Residual risk |
+|----|--------------|-------|----------|---------------|
+| **U3 panel navigation** | The drag/paint buttons were removed in the earlier pass, which also removed the only way to walk the array. Added **‹ Previous / Select panel / Next ›** with a **Panel B-03 of 15** counter, and turned the ✕ into a labelled **Reset inspected panel**. Stepping uses `on_click` callbacks writing `gm_sel`, so the keyed selectbox is in sync on the same run; they disable at the ends and do not wrap. Every control has a `help=`. | `page_panels` (`_step_panel`) | T13 (10 browser checks), `test_T13_*` | None. |
+| **U3 state rule** | Changing the inspected panel updates `scenario_draft` — in this dashboard the draft *is* the inspected panel, since `sel_irr` depends on whether that panel is shaded. It writes nothing else: an AST test asserts `_step_panel` touches only `gm_sel`, and a browser test snapshots every other control across a step. | `_step_panel`, `_set_draft` | T13, `test_T13_panel_navigation_touches_only_the_inspected_panel` | The divergence warning still lives on Watch one run only (the banner was removed at the user's request). |
+| **U4 record fields** | The sampled day record carried only `time_label`, `module_source`, `active_events`. It now also carries `source`, `time_hour`, `module_applied`, `scenario_hash`, and a per-event `events` list with `kind`, `uid`, `start_hour`, `end_hour`, `duration_hours`, `motion` — enough to reconstruct why the irradiance looks as it does. `active_events` alone could not tell two poles apart. | `_day_sample_scenarios` | `test_U4_day_record_carries_every_declared_field` | None. |
+| **U4 display rule** | `_IMPORT_SENTENCE` is defined once and used twice: on the import message and inside the saved record (`config.imported_note`). A saved file can no longer outlive the explanation that the module did not come with the irradiance. | `_IMPORT_SENTENCE`, `page_sim_setup`, `_bench_record` | Phase B (U4 round trip), `test_U4_import_sentence_is_shared_by_message_and_record` | None. |
+| **T12** | No code change — `_day_window_from_hour` already anchored events to the playhead and shifted left near 18:00. Now proven rather than assumed, at 08:00, 12:00, 15:00 and 17:00. | — | T12 (28 browser checks + unit) | None. |
+
+**Phase B tests:** pytest 33/33 · T12 28/28 · Phase B browser 22/22.
+
+**Note on T12 at 17:00.** The document lists 17:00 among the hours where "each new event starts at the selected hour", and separately requires that "near 18:00, the window shifts left and keeps its 1.5 h duration". With a 1.5 h duration those cannot both hold at 17:00 (17:00 + 1.5 h = 18:30). The implementation keeps the duration and shifts left, giving **16:30–18:00**, which still covers the 17:00 tick the user clicked. My first test encoded the other reading and failed; the test now encodes the exception.
+
+**Disclosure:** the first run of the malformed/schema fixtures restored `tracker_comparison_val.json` with `write_bytes`, which preserved its **content** (SHA-256 verified identical, T16 passed) but reset its **mtime** to 2026-09-22 18:11. The provenance stamp for that one file therefore shows that date instead of its original 2026-09-16 10:14. No benchmark value changed. The harness now uses `shutil.copy2`, which preserves timestamps, and a re-run confirmed mtimes hold steady. If the original timestamp matters, re-run `phase2/p7_tracker_comparison.py --split val`.
+
+
 One row per finding. "Verified" names the test that covers it: `T*` are the
 acceptance tests (browser-driven unless marked *unit*), `pytest` means
 `tests/test_app_smoke.py`.

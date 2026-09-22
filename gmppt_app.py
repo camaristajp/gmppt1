@@ -33,6 +33,7 @@ from gmppt.hybrid import SEED_PROBE_COST
 st.set_page_config(page_title="GMPPT Bench", layout="wide", initial_sidebar_state="collapsed")
 sim.init_state()
 st.session_state.setdefault("gm_theme", "Light")
+st.session_state.setdefault("gm_anim", "On")     # §6 — global animation switch
 
 # Theme: the existing figures read sim.TH, so keep it in step with the new tokens.
 ui.setup(st.session_state.gm_theme)
@@ -309,6 +310,13 @@ def _pool():
     return pd.read_parquet(_gcfg.CEC_POOL)
 
 
+# The parameters the nearest-training-module distance is measured in. z-scored
+# over the FULL pool so no single column (N_s, in the hundreds) dominates.
+_DIST_COLS = ("V_mp_ref", "I_mp_ref", "V_oc_ref", "I_sc_ref", "N_s")
+# The demo scenario's module is picked from this band, deterministically. (U1)
+_DEMO_NS, _DEMO_P_MIN, _DEMO_P_MAX = 72, 340.0, 380.0
+
+
 @st.cache_data(show_spinner=False)
 def _val_module_names() -> frozenset:
     """The validation module set, resolved through the same call p7 --split val
@@ -316,8 +324,137 @@ def _val_module_names() -> frozenset:
     return frozenset(str(m) for m in _ds.module_split().val)
 
 
+@st.cache_data(show_spinner=False)
+def _train_module_names() -> frozenset:
+    """The training set — needed to answer "was this module fitted on?" live."""
+    return frozenset(str(m) for m in _ds.module_split().train)
+
+
+@st.cache_data(show_spinner=False)
+def _split_counts() -> dict:
+    s = _ds.module_split()
+    return {"train": len(s.train), "val": len(s.val), "test": len(s.test)}
+
+
 def _in_val(name: str) -> bool:
     return str(name) in _val_module_names()
+
+
+@st.cache_data(show_spinner=False)
+def _zmatrix():
+    """Pool parameters, z-scored over the whole pool. Index-aligned to _pool()."""
+    pool = _pool()
+    X = pool[list(_DIST_COLS)].astype(float)
+    sd = X.std(ddof=0).replace(0.0, 1.0)
+    return (X - X.mean()) / sd
+
+
+@st.cache_data(show_spinner=False)
+def _nearest_train(name: str):
+    """(nearest training module, z-scored distance) for one module.
+
+    Computed live against `dataset.module_split().train`, not against anything
+    stored in the model file — the model does not record its training list. The
+    note beside the check on screen says so. (U1.8)
+    """
+    Z = _zmatrix()
+    name = str(name)
+    train = [m for m in _train_module_names() if m in Z.index]
+    if name not in Z.index or not train:
+        return None, float("nan")
+    d = np.linalg.norm(Z.loc[train].to_numpy() - Z.loc[name].to_numpy(), axis=1)
+    i = int(np.argmin(d))
+    return str(train[i]), float(d[i])
+
+
+@st.cache_data(show_spinner=False)
+def _demo_module() -> tuple:
+    """The demo module for Watch one run and Dynamic irradiance. (U1.2)
+
+    Deterministic: among validation modules with N_s == 72 and P in
+    [340, 380] W, take the one whose NEAREST TRAINING module is farthest away in
+    z-scored parameter space. Picking the most distant candidate is the point —
+    a demo is meant to show the method working on something the model was not
+    fitted near, and the split is by module name, so near-identical siblings can
+    land on opposite sides of it.
+
+    Returns (name, distance, nearest training module, note).
+    """
+    pool = _pool()
+    Z = _zmatrix()
+    val = [n for n in _val_module_names() if n in pool.index]
+    h = pool.loc[val].copy()
+    h["P"] = h["V_mp_ref"] * h["I_mp_ref"]
+    cand = h[(h["N_s"] == _DEMO_NS) & (h["P"].between(_DEMO_P_MIN, _DEMO_P_MAX))]
+    note = ""
+    if not len(cand):
+        cand = h[h["N_s"] == _DEMO_NS] if len(h[h["N_s"] == _DEMO_NS]) else h
+        note = (f"No validation module matched N_s={_DEMO_NS} and "
+                f"{_DEMO_P_MIN:.0f}–{_DEMO_P_MAX:.0f} W, so the band was widened.")
+    names = [n for n in cand.index if n in Z.index]
+    train = [m for m in _train_module_names() if m in Z.index]
+    if not names or not train:
+        return ("—", float("nan"), None, "No validation module could be resolved.")
+    C = Z.loc[names].to_numpy()
+    T = Z.loc[train].to_numpy()
+    # nearest training neighbour for every candidate, in chunks so the pairwise
+    # matrix never gets large
+    best_d = np.full(len(names), np.inf)
+    best_i = np.zeros(len(names), dtype=int)
+    for s in range(0, len(train), 4000):
+        blk = T[s:s + 4000]
+        d = np.linalg.norm(C[:, None, :] - blk[None, :, :], axis=2)
+        j = d.argmin(axis=1)
+        dm = d[np.arange(len(names)), j]
+        upd = dm < best_d
+        best_i[upd] = s + j[upd]
+        best_d[upd] = dm[upd]
+    k = int(np.argmax(best_d))
+    return (str(names[k]), float(best_d[k]), str(train[best_i[k]]), note)
+
+
+def _demo_startup_log():
+    """Log the chosen demo module and its distance once per session. (U1.2)"""
+    if st.session_state.get("_demo_logged"):
+        return
+    name, dist, near, _ = _demo_module()
+    print(f"[gmppt_app] demo module: {name} (validation) · nearest training module "
+          f"{near} at z-distance {dist:.3f} · split "
+          f"{_split_counts()}", flush=True)
+    st.session_state["_demo_logged"] = True
+
+
+def assert_val_modules(names, what="this page") -> bool:
+    """Every module on screen must be a validation module. (U1.3)
+
+    A module that has slipped into train or test invalidates the page it is on,
+    so the page renders no results rather than a figure that cannot be quoted.
+    """
+    val, train = _val_module_names(), _train_module_names()
+    bad = []
+    for n in names:
+        n = str(n)
+        if n in train:
+            bad.append((n, "training"))
+        elif n not in val:
+            bad.append((n, "not in the validation split (test, or absent)"))
+    if not bad:
+        return True
+    listed = "; ".join(f"`{n}` is in the {w} set" for n, w in bad[:4])
+    ui.callout(
+        f"{what} tried to show a module that is not a validation module: {listed}. "
+        f"Nothing is rendered here. The dashboard resolves its modules through "
+        f"`dataset.module_split().val` — the same set "
+        f"`p7_tracker_comparison.py --split val` runs on — and the held-out test "
+        f"set is never opened here.",
+        "Module split violation", "limit")
+    return False
+
+
+# Wording used wherever the dashboard describes the modules it shows. "Held-out"
+# and "never seen" belong to the TEST set and are never used for these. (U1.6)
+_VAL_WORDING = ("Validation module — not used to fit the model; used for method "
+                "comparison. The held-out test set is not shown in this dashboard.")
 
 
 @st.cache_data(show_spinner=False)
@@ -485,11 +622,30 @@ def _set_draft(module, temp, irr, label):
     st.session_state["scenario_draft"] = _scenario(module, temp, irr, label)
 
 
+def _mirror_scenario(sc: dict) -> None:
+    """The dashboard's ONE write to results/, and it goes in its own directory.
+
+    `results/dashboard/` rather than `results/` proper, so a dashboard artefact
+    can never sit beside a benchmark export and be mistaken for one. Everything
+    under results/phase2/ is read-only to this app. Failure is swallowed: losing
+    the mirror must not take a page down with it. (§2.3)
+    """
+    import json
+    try:
+        d = _gcfg.RESULTS_DIR / "dashboard"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "current_scenario.json").write_text(
+            json.dumps(sc, indent=2, default=str), encoding="utf-8")
+    except Exception:
+        pass
+
+
 def _send_scenario():
     """Copy the draft to the sent slot — the one write Testing reads."""
     draft = st.session_state.get("scenario_draft")
     if draft:
         st.session_state["scenario_sent"] = dict(draft)
+        _mirror_scenario(draft)
     return draft
 
 
@@ -706,15 +862,35 @@ def _day_sample_scenarios(events, base_G, temp, module, step_minutes=15):
         irr, sun_G, active = _day_event_state(events, float(h), base_G, _gcfg.N_SUBSTRINGS)
         if not active:
             continue
+        # Which events were live at this instant, with enough of each to
+        # reconstruct why the irradiance looks the way it does. `active` is only
+        # a list of kind names, which cannot tell two poles apart. (U4)
+        live = []
+        for ev in events:
+            if str(ev.get("kind")) not in active:
+                continue
+            h0, h1 = 6.0 + float(ev.get("t0", 0)) * 12, 6.0 + float(ev.get("t1", 1)) * 12
+            if not (h0 <= float(h) <= h1):
+                continue
+            live.append({"kind": str(ev.get("kind")), "uid": ev.get("uid"),
+                         "start_hour": round(h0, 2), "end_hour": round(h1, 2),
+                         "duration_hours": round(h1 - h0, 2),
+                         "motion": ev.get("motion", "fixed in place")})
         out.append({
+            "source": "Explore · day-event timeline",
             "time_hour": round(float(h), 2),
             "time_label": f"{int(h):02d}:{int(round((h % 1) * 60)) % 60:02d}",
+            # module_source is the CEC module the events were designed on;
+            # module_applied is the Sandbox datasheet that will actually draw the
+            # curve. They are different engines and the record says so. (U4)
             "module_source": str(module),
+            "module_applied": str(st.session_state.get("bench_preset", "—")),
             "temperature_C": float(temp),
             "base_irradiance_Wm2": float(sun_G),
             "substring_irradiance_Wm2": irr,
             "active_events": active,
-            "source": "Explore · The panels · day-event timeline",
+            "events": live,
+            "scenario_hash": _scenario_hash(module, temp, irr),
         })
     return out
 
@@ -895,7 +1071,39 @@ def _day_run(module, temp, base_G, events_key):
     return out
 
 
+def _unseen_check(name):
+    """Was this module fitted on, and what is the closest one that was? (U1.5)
+
+    Both answers are computed live from `dataset.module_split()`, not read from a
+    label, so the panel cannot go stale if the split changes.
+    """
+    c = ui.T()
+    counts = _split_counts()
+    in_train = str(name) in _train_module_names()
+    near, dist = _nearest_train(name)
+    rows = [
+        ("split", f"train {counts['train']:,} · val {counts['val']:,} · "
+                  f"test {counts['test']:,} (test not shown here)"),
+        ("in training set", "Yes" if in_train else "No"),
+        ("closest module the model was trained on",
+         f"{near} (distance {dist:.2f})" if near else "—"),
+    ]
+    cells = "".join(
+        f"<span style='color:{c['text_muted']}'>{_e(k)}</span>"
+        f"<span style='color:{c['red'] if (k == 'in training set' and in_train) else c['text']}'>"
+        f"{_e(v)}</span>" for k, v in rows)
+    st.markdown(
+        f"<div class='bmono' style='margin-top:8px;padding:9px 11px;border:1px solid "
+        f"{c['border']};border-radius:8px;background:{c['surface_alt']};display:grid;"
+        f"grid-template-columns:auto 1fr;gap:5px 10px;font-size:11px;line-height:1.4'>"
+        f"{cells}</div>", unsafe_allow_html=True)
+    st.caption(f"{_VAL_WORDING} The check compares against the split function, not "
+               f"against a training list stored in the model — the model file does "
+               f"not record one.")
+
+
 def page_panels():
+    _demo_startup_log()
     ui.page_intro("Your panels",
                   "Put a shadow on a panel and see what it does to the power it can make.",
                   "Explore · The panels")
@@ -907,6 +1115,9 @@ def page_panels():
         ui.callout(f"Could not load the validation-module pool ({e}). Make sure the "
                    "`gmppt/` package and `results/cec_pool.parquet` sit beside "
                    "`gmppt_app.py`.", "Engine not connected", "limit")
+        return
+    # Nothing is drawn unless every module offered is a validation module. (U1.3)
+    if not assert_val_modules([n for _, n in val_mods], "The panel dropdown"):
         return
 
     label_to_name = dict(val_mods)
@@ -920,8 +1131,9 @@ def page_panels():
             awaiting = pick.startswith("Nanum")
             name = val_mods[0][1] if awaiting else label_to_name[pick]
             if awaiting:
-                ui.callout("Nanum's target spec is awaited — showing a held-out "
-                           "validation module in the meantime.", "", "info")
+                ui.callout("Nanum's target spec is awaited — a validation module is "
+                           "shown in the meantime.", "", "info")
+            _unseen_check(name)
             rows = int(_dual("Rows (strings)", "gm_rows", [1, 2, 3, 4, 6], "", 1, 1, 6, 3))
             per = int(_dual("Per row", "gm_per", [1, 2, 3, 4, 5, 6, 8], "", 1, 1, 8, 5))
             mount = st.segmented_control("Mounting", ["Portrait", "Landscape"],
@@ -1007,19 +1219,54 @@ def page_panels():
         # The drag and paint tools are gone rather than shown disabled: a control
         # that can never be enabled is furniture, and the shadow controls on the
         # left already do the job.
-        th = st.columns([6, 0.7], vertical_alignment="center")
-        th[0].markdown(
+        st.markdown(
             f"<div class='bh'>Your panels</div>"
             f"<div style='font-size:13.5px;color:{c['text_muted']}'>{n_panels} panels in "
             f"{rows} string{'s' if rows > 1 else ''} — pick one to inspect it.</div>",
             unsafe_allow_html=True)
-        if th[1].button("✕", key="tool_clear", use_container_width=True,
-                        help="Clear the inspected-panel choice and go back to the "
-                             "first shaded panel. Nothing else is reset."):
-            st.session_state.pop("gm_sel", None); st.rerun()
+
+        # ---- panel navigation (U3) ----------------------------------------
+        # The drag and paint tools are gone (they could never be enabled), but
+        # walking the array is a real need, so Previous/Next replace them. These
+        # move the INSPECTED panel only: the draft follows, because `sel_irr`
+        # depends on whether this panel is shaded, but nothing else does.
         default_id = shaded_ids[0] if shaded_ids else ids[0]
-        sel_id = st.selectbox("Inspect panel", ids, index=ids.index(default_id), key="gm_sel")
+        if st.session_state.get("gm_sel") not in ids:
+            st.session_state["gm_sel"] = default_id
+        cur_idx = ids.index(st.session_state["gm_sel"])
+
+        def _step_panel(delta):
+            """on_click so the keyed selectbox sees the new value on this run."""
+            i = ids.index(st.session_state.get("gm_sel", default_id))
+            st.session_state["gm_sel"] = ids[min(max(i + delta, 0), len(ids) - 1)]
+
+        nav = st.columns([0.9, 2.6, 0.9, 1.6], vertical_alignment="bottom")
+        nav[0].button("‹ Previous", key="gm_panel_prev", use_container_width=True,
+                      disabled=cur_idx == 0, on_click=_step_panel, args=(-1,),
+                      help="Inspect the previous panel in the array. Stops at the "
+                           "first panel; it does not wrap around.")
+        with nav[1]:
+            sel_id = st.selectbox("Select panel", ids, key="gm_sel",
+                                  help="Jump straight to a panel. Changing the inspected "
+                                       "panel updates the draft scenario, because a "
+                                       "shaded panel has a different curve. It does not "
+                                       "change the shadow, the conditions, the scenario "
+                                       "already sent to Testing, or your saved scenarios.")
+        nav[2].button("Next ›", key="gm_panel_next", use_container_width=True,
+                      disabled=cur_idx == len(ids) - 1, on_click=_step_panel, args=(1,),
+                      help="Inspect the next panel in the array. Stops at the last "
+                           "panel; it does not wrap around.")
         sel_idx = ids.index(sel_id)
+        nav[3].markdown(
+            f"<div class='bmono' style='font-size:12.5px;color:{c['text_muted']};"
+            f"padding-bottom:10px'>Panel {_e(sel_id)} of {n_panels}</div>",
+            unsafe_allow_html=True)
+        if st.button("Reset inspected panel", key="tool_clear",
+                     help="Go back to the first shaded panel. The shadow, the "
+                          "conditions and everything you have saved are left alone."):
+            st.session_state["gm_sel"] = default_id
+            st.toast(f"Inspecting {default_id} again — nothing else was reset.")
+            st.rerun()
         st.markdown(_array_svg(rows, per, shaded_idx, sel_idx,
                                ui.EVENT_COLORS.get(obj, "#C2BFB6"), c, sel_id),
                     unsafe_allow_html=True)
@@ -1414,6 +1661,11 @@ def _bench_record(label, ds, n_sub, m_str, p_str, base_G, T, sub_irr, res):
             "model": {"type": "interactive simulator — single-diode + per-substring bypass",
                       "note": "Exploratory engine. Not the validated engine behind the "
                               "benchmark figures."},
+            # A record born from a day-event import carries the same sentence the
+            # user saw on import, so the file cannot outlive the explanation. (U4)
+            "imported_note": (
+                _IMPORT_SENTENCE.format(preset=st.session_state.get("bench_preset", "—"))
+                if st.session_state.get("bench_import_meta") else None),
             "bench": {"preset": st.session_state.get("bench_preset"),
                       "obj": st.session_state.get("bench_obj", "Custom"),
                       "ds": {k: ds[k] for k in sim.DS_FIELDS},
@@ -1459,6 +1711,34 @@ def _bench_save(label, ds, n_sub, m_str, p_str, base_G, T, sub_irr, res):
                  f"{dropped.get('label', 'unnamed')}.")
 
 
+# The run signature has ONE builder. It previously existed twice — once inline in
+# page_sim_setup and once in _bench_load — and when R6 widened it to carry
+# base_G and the array scaling, only the first copy was updated. Loading a saved
+# scenario then wrote a 4-tuple that the 7-way unpack could not take, and the
+# page died with a ValueError. Two derivations of one quantity, in two places.
+_BENCH_SIG_LEN = 7
+
+
+def _bench_sig(ds, T, sub_irr, n_sub, base_G, m_str, p_str):
+    return (tuple(sorted(ds.items())), int(T),
+            tuple(float(x) for x in sub_irr), int(n_sub),
+            int(base_G), int(m_str), int(p_str))
+
+
+def _bench_ran():
+    """The last run's signature, or None if absent or of an older shape.
+
+    A stale shape is treated as "not run yet" rather than crashing the page: a
+    session restored from an older build must degrade to the empty state.
+    """
+    ran = st.session_state.get("bench_ran")
+    if isinstance(ran, tuple) and len(ran) == _BENCH_SIG_LEN:
+        return ran
+    if ran is not None:
+        st.session_state.pop("bench_ran", None)
+    return None
+
+
 def _bench_load(rec):
     """Put a saved scenario's controls back on Set up a panel, and mark it as run."""
     b = (rec.get("config") or {}).get("bench")
@@ -1477,10 +1757,9 @@ def _bench_load(rec):
     st.session_state["bench_T"] = int(b["T"])
     for i, g in enumerate(b["sub_irr"]):
         st.session_state[f"bench_s{i}"] = float(g)
-    ds_key = tuple(sorted({k: (int(v) if k == "Ns" else float(v))
-                           for k, v in b["ds"].items()}.items()))
-    st.session_state["bench_ran"] = (ds_key, int(b["T"]),
-                                     tuple(float(x) for x in b["sub_irr"]), int(b["nsub"]))
+    ds = {k: (int(v) if k == "Ns" else float(v)) for k, v in b["ds"].items()}
+    st.session_state["bench_ran"] = _bench_sig(
+        ds, b["T"], b["sub_irr"], b["nsub"], b["baseG"], b["mstr"], b["pstr"])
     return True
 
 
@@ -1521,6 +1800,12 @@ def _bench_css(c):
         unsafe_allow_html=True)
 
 
+# One sentence, used both on import and inside the saved record, so the note the
+# user reads and the note stored with the scenario cannot drift apart. (U4)
+_IMPORT_SENTENCE = ("Irradiance conditions were imported; the module was not. This curve "
+                    "uses the Sandbox datasheet `{preset}` on the simplified engine.")
+
+
 def _bh(title):
     return f"<span class='bh'>{title}</span>"
 
@@ -1543,15 +1828,20 @@ def page_sim_setup():
                 st.session_state[f"bench_s{i}"] = float(value)
             st.session_state["bench_scen_name"] = f"Day event · {day_import.get('time_label', 'sample')}"
             st.session_state["bench_import_meta"] = {
-                "source": day_import.get("source", "Explore · The panels · day-event timeline"),
+                "source": day_import.get("source", "Explore · day-event timeline"),
                 "time_label": day_import.get("time_label"),
+                "time_hour": day_import.get("time_hour"),
                 "active_events": list(day_import.get("active_events", [])),
+                "events": list(day_import.get("events", [])),
                 "module_source": day_import.get("module_source"),
+                "module_applied": str(st.session_state.get("bench_preset", "—")),
+                "scenario_hash": day_import.get("scenario_hash"),
             }
             st.session_state["bench_import_sig"] = (
                 tuple(float(v) for v in imported_irr[:n_import]),
                 int(st.session_state["bench_baseG"]), int(st.session_state["bench_T"]))
-            st.info("Loaded irradiance from the day-event timeline. The Simulator keeps its current datasheet module and applies the imported substring irradiance as a custom scenario.")
+            st.info(_IMPORT_SENTENCE.format(
+                preset=st.session_state.get("bench_preset", "—")))
 
         # The sub-tab row is gone: ui.app_header already draws the Sandbox tabs,
         # and two tab rows that can disagree is one too many.
@@ -1716,8 +2006,7 @@ def page_sim_setup():
             # base_G and the array scaling are part of the signature because the saved
             # record and the "array (scaled)" KPI quote them: a record must never mix
             # the inputs that were run with ones changed afterwards. (R6)
-            cur_sig = (ds_key, int(T), tuple(float(x) for x in sub_irr), int(n_sub),
-                       int(base_G), int(m_str), int(p_str))
+            cur_sig = _bench_sig(ds, T, sub_irr, n_sub, base_G, m_str, p_str)
             # The import label describes a set of irradiance values. Once any of
             # them (or the conditions) are edited by hand it no longer describes
             # what is on screen, so it goes. (R5)
@@ -1731,7 +2020,7 @@ def page_sim_setup():
                     st.session_state.pop("bench_import_sig", None)
             if run_clicked and divides:
                 st.session_state["bench_ran"] = cur_sig
-            ran = st.session_state.get("bench_ran")
+            ran = _bench_ran()
 
             if not divides:
                 with st.container(border=True):
@@ -2036,8 +2325,19 @@ _METHOD_LABELS = {
 }
 
 
+UNKNOWN_VARIANT = "Unknown variant — export schema needs review"
+
+
 def method_label(key: str) -> str:
-    return _METHOD_LABELS.get(str(key), str(key))
+    """Display name for an export key or an `fn.__name__`.
+
+    Identity comes from the table alone — never from the display text and never
+    from a substring match. A key the table does not know is shown as unknown
+    rather than being filed under whichever family its name resembles: a new
+    hybrid variant silently rendered as "Hybrid" would be read as the headline
+    result. (U6)
+    """
+    return _METHOD_LABELS.get(str(key), UNKNOWN_VARIANT)
 
 
 _RUN_METHODS = ["P&O", "InC", "PSO", "Model only", "Hybrid (bounded)", "Perfect tracker"]
@@ -2070,31 +2370,9 @@ def _pso_readings(pso_export: dict | None) -> tuple[int | None, dict | None]:
     return (int(val) if val is not None else None), best
 
 
-@st.cache_data(show_spinner=False)
-def _demo_module() -> tuple[str, str]:
-    """A VALIDATION module for the built-in demo scenarios, plus a note.
-
-    The previous literal (LG_Electronics_Inc__LG375N2K_G4) is a TRAINING module —
-    one the model was fitted on — so a demo built on it could not illustrate a
-    reportable result. Resolved against the same set p7 --split val uses.
-    """
-    previous = "LG_Electronics_Inc__LG375N2K_G4"
-    if _in_val(previous):
-        return previous, ""
-    pool = _pool()
-    names = [n for n in _val_module_names() if n in pool.index]
-    h = pool.loc[names].copy()
-    h["P"] = h["V_mp_ref"] * h["I_mp_ref"]
-    s = h[h["N_s"] == 72].sort_values("P")
-    if not len(s):
-        s = h.sort_values("P")
-    pick = str(s.index[len(s) // 2])
-    return pick, (f"The previous demo module ({previous}) is a TRAINING module, so it "
-                  f"was replaced with the median-power 72-cell validation module "
-                  f"({pick}).")
-
-
 def _run_demo() -> dict:
+    """The demo scenario. Irradiance and temperature are unchanged from the
+    original; only the module is now resolved rather than hardcoded. (U1.2)"""
     return dict(module=_demo_module()[0], temp=43.0, irr=(910.0, 300.0, 600.0))
 
 
@@ -2213,12 +2491,15 @@ def page_run():
             st.rerun()
     else:
         _demo = _run_demo()
+        if not assert_val_modules([_demo["module"]], "Watch one run"):
+            return
         d = _run_scenario(_demo["module"], _demo["temp"], _demo["irr"])
-        note = _demo_module()[1]
+        _name, _dist, _near, _note = _demo_module()
         ui.callout(
             f"No scenario has been sent from Explore, so this is the built-in example: "
-            f"a validation module ({_demo['module']}) under a three-region shadow. "
-            f"{note + ' ' if note else ''}"
+            f"{_demo['module']} under a three-region shadow. {_VAL_WORDING} "
+            f"Its nearest training module is {_near} at a z-scored parameter distance "
+            f"of {_dist:.2f}. {_note + ' ' if _note else ''}"
             f"Build your own on Explore · The panels and press “Send this panel to "
             f"the trackers”.",
             "Showing the example scenario", "info")
@@ -2394,9 +2675,208 @@ def page_run():
             st.page_link(P["relocation"],
                          label="What happens when the peak jumps to another strip \u2192")
 
+    # ---- A1: search replay, under the static chart it explains ----
+    with st.container(border=True):
+        _a1_search_replay(d, sel, c)
+
 
 def _bh_run(title, size=17):
     return f"<span class='bh' style='font-size:{size}px'>{title}</span>"
+
+
+# =========================================================================== #
+# A1 — Watch one run · Search replay  (Update 3 §5.3)
+#
+# Live illustration: it replays the trajectories `_run_scenario` already
+# computed on THIS scenario. No tracker is re-run for the animation and no
+# trajectory is invented — every marker is v_hist[k], p_hist[k].
+# =========================================================================== #
+_PSO_POP, _PSO_ITERS = None, None
+
+
+def _pso_grouping():
+    """Can PSO's particle identity be recovered from the recorded sequence?
+
+    gmppt/pso.py evaluates `for _ in range(iterations): for i in range(population)`
+    in fixed order, so evaluation k is particle k % M of iteration k // M. That
+    is recoverable, and T26 checks M against the module. If that loop ever stops
+    being a fixed-order nest, this returns None and the UI says the identity is
+    not recorded rather than guessing a grouping.
+    """
+    try:
+        from gmppt import pso as _pso
+        import inspect
+        src = inspect.getsource(_pso.particle_swarm)
+        fixed = ("for _ in range(iterations)" in src
+                 and "for i in range(population)" in src)
+        return (int(_pso.DEFAULT_POPULATION), int(_pso.DEFAULT_ITERATIONS)) if fixed else None
+    except Exception:
+        return None
+
+
+def _a1_frames(d, methods, n_steps, probe_n):
+    """Frames for the search replay, plus the key frames and per-method counters.
+
+    A frame carries only what changes: the marker and a short trail per method.
+    The curve, the GMPP and the region band are static background, drawn once.
+    """
+    per = {}
+    for m in methods:
+        r = d["methods"][m]
+        per[m] = (r["v_hist"], r["p_hist"])
+    total = min(n_steps, max((len(v) for v, _ in per.values()), default=0))
+    key = {0, max(total - 1, 0)}
+    if any(m.startswith(("Hybrid", "Model only")) for m in methods):
+        key.add(min(probe_n, max(total - 1, 0)))          # end of the probe phase
+    for m in methods:
+        r = d["methods"][m]
+        if r["reached"] and r["steps"] is not None and r["steps"] < total:
+            key.add(int(r["steps"]))                       # arrival step
+
+    keep, stride = ui.downsample(total, sorted(key))
+    p_gmpp = float(d["p_gmpp"]) or 1.0
+    frames = []
+    for k in keep:
+        markers, trails, counters = {}, {}, {}
+        for m in methods:
+            vh, ph = per[m]
+            if k >= len(vh):
+                continue
+            markers[m] = {"V": vh[k], "P": ph[k]}
+            lo = max(0, k - 10)
+            trails[m] = [(vh[j], ph[j]) for j in range(lo, k + 1)]
+            counters[m] = {"steps": k + 1, "power": ph[k],
+                           "pct_gmpp": 100.0 * ph[k] / p_gmpp}
+        frames.append({"step": k, "markers": markers, "trails": trails,
+                       "counters": counters})
+    return frames, sorted(key), stride
+
+
+def _a1_summary(d, methods):
+    """The text alternative (§5.5), generated from the same scorer the table uses."""
+    bits = []
+    for m in methods:
+        r = d["methods"][m]
+        if not r["reached"]:
+            bits.append(f"{m} stops at a local peak (−{r['lost']:.0f} W)")
+        elif r["steps"] is None:
+            bits.append(f"{m} reaches the true peak but never settles")
+        else:
+            bits.append(f"{m} reaches the true peak after {int(r['steps'])} steps")
+    return "; ".join(bits) + "."
+
+
+def _a1_search_replay(d, sel, c):
+    """Render A1. Returns nothing; everything it shows comes from `d`."""
+    st.markdown(_bh_run("Search replay — watch each method look") +
+                f"<span style='font-size:13px;color:{c['text_muted']};margin-left:10px'>"
+                f"the same curve, step by step, with what each one has spent</span>",
+                unsafe_allow_html=True)
+    methods = [m for m in sel if m in d["methods"]]
+    if not methods:
+        st.caption("Choose at least one method above.")
+        return
+
+    probe_n = SEED_PROBE_COST
+    pso_grp = _pso_grouping()
+    ui.anim_badge("live", f"{d.get('module_label', 'this scenario')} · validated engine")
+
+    cA, cB = st.columns([1.2, 1])
+    n_steps = int(cA.number_input("Steps to replay", 10, 400, 60, 10, key="a1_steps",
+                                  help="The run is longer than this; the replay shows "
+                                       "the first N steps, where the searching happens."))
+    view = cB.segmented_control("view", ["Together", "Side by side"],
+                                default="Together", key="a1_view",
+                                label_visibility="collapsed") or "Together"
+
+    # The built state lives in the session, not in the button's return value: a
+    # button is True for exactly one run, so reading it directly would make the
+    # replay vanish the moment the user touched any other control on the page.
+    if st.button("▶ Build the replay", key="a1_build",
+                 help="Builds the animation frames from the trajectories already "
+                      "computed for this scenario. Nothing is re-simulated."):
+        st.session_state["a1_built"] = True
+    if not st.session_state.get("a1_built"):
+        st.caption("Press ▶ to build the replay. Frames are built from trajectories "
+                   "that are already computed and cached — no tracker is re-run.")
+        return
+
+    import time as _time
+    t0 = _time.perf_counter()
+    frames, key_frames, stride = _a1_frames(d, methods, n_steps, probe_n)
+    build_s = _time.perf_counter() - t0
+    if not frames:
+        ui.callout("No recorded steps for the selected methods.", "Nothing to replay", "limit")
+        return
+
+    series = {m: {"color": ui.method_style(m)["color"],
+                  "symbol": _A1_SYMBOLS.get(m.split(" (")[0], "circle")}
+              for m in methods}
+
+    # static background: the curve, the GMPP, and the seed's region band
+    V, Pw = list(d["V"]), list(d["P"])
+    static = [go.Scatter(x=V, y=Pw, mode="lines", name="P–V",
+                         line=dict(color=c["teal"], width=2.5)),
+              go.Scatter(x=[d["v_gmpp"]], y=[d["p_gmpp"]], mode="markers", name="true peak",
+                         marker=dict(symbol="star", size=15, color=ui.PEAK_COLORS["gmpp"]))]
+
+    caption = _a1_summary(d, methods)
+    if not ui.anim_on():
+        ui.callout("Animations are off, so the key frames are shown instead. Turn them "
+                   "on in the header to play the search.", "Static view", "info")
+        ui.snapshot_strip(frames, [i for i, f in enumerate(frames)
+                                   if f["step"] in key_frames],
+                          captions=[f"step {k}" for k in key_frames],
+                          static_traces=static, series=series, key="a1")
+        st.markdown(f'<div class="gm-legend">{_e(caption)}</div>', unsafe_allow_html=True)
+        return
+
+    fig = ui.trace_player(frames, series, static_traces=static, height=460,
+                          key_frames=key_frames, view=view.lower().replace(" ", "_"))
+    ui.show_chart(fig, key="a1_player")
+
+    # counters, from the last frame of the replay
+    last = frames[-1]["counters"]
+    head = "".join(f"<span style='color:{c['text_muted']};font-size:11px'>{h}</span>"
+                   for h in ("method", "control steps", "power now", "% of true peak"))
+    body = "".join(
+        f"<span style='font-weight:500'>{_e(m)}</span>"
+        f"<span>{last[m]['steps']}</span><span>{last[m]['power']:.0f} W</span>"
+        f"<span>{last[m]['pct_gmpp']:.1f}%</span>"
+        for m in methods if m in last)
+    st.markdown(f"<div class='bmono' style='display:grid;"
+                f"grid-template-columns:1.6fr .8fr .8fr .9fr;gap:5px 12px;"
+                f"font-size:12px'>{head}{body}</div>", unsafe_allow_html=True)
+
+    if "PSO" in methods:
+        if pso_grp:
+            m_pop, _it = pso_grp
+            st.caption(f"PSO evaluates {m_pop} particles per iteration in fixed order "
+                       f"(`gmppt/pso.py`), so evaluation k is particle k % {m_pop} of "
+                       f"iteration k // {m_pop}. Each dot is one evaluation, which is one "
+                       f"control step.")
+        else:
+            st.caption("Sequential evaluations — particle identity not recorded.")
+
+    st.markdown(f'<div class="gm-legend">{_e(caption)}</div>', unsafe_allow_html=True)
+    with st.expander("Show key frames", expanded=False):
+        ui.snapshot_strip(frames, [i for i, f in enumerate(frames)
+                                   if f["step"] in key_frames],
+                          captions=[f"step {k}" for k in key_frames],
+                          static_traces=static, series=series, key="a1-keys")
+    measured = ui.anim_exports(fig, frames,
+                               {"badge": "live illustration",
+                                "detail": "one scenario, validated engine",
+                                "scenario": d.get("scenario_hash"),
+                                "stride": stride}, key="a1", name="search_replay")
+    ui.anim_budget_note(measured, stride, build_s)
+    print(f"[gmppt_app] A1 frames={measured['frames']} stride={stride} "
+          f"json={measured['figure_json_mb']}MB build={build_s:.3f}s", flush=True)
+
+
+# Markers differ by symbol as well as colour, so colour is never the only cue (§5.5).
+_A1_SYMBOLS = {"P&O": "triangle-up", "InC": "triangle-down", "PSO": "diamond",
+               "Model only": "square", "Hybrid": "circle", "Perfect tracker": "x"}
 
 
 # Snapshot from the validation report (p7 static n=632, p9 convergence). Replace with the
@@ -2410,13 +2890,33 @@ _SNAPSHOT = pd.DataFrame([
 ], columns=["Method", "Energy captured (%)", "Found true peak (%)", "Steps", "Readings", "Worst case (W)"])
 
 
-def _load_json(rel):
+def _read_export(rel):
+    """(data, problem) for one export. `problem` is None when the file is fine.
+
+    Missing, unreadable, malformed and wrong-shaped are four different things and
+    they need four different sentences: "run the script" is useless advice for a
+    file that exists but is truncated. Nothing here ever repairs, regenerates or
+    normalises the file — the dashboard is read-only over results/phase2/.
+    """
     import json
     p = _gcfg.RESULTS_DIR / rel
+    if not p.exists():
+        return None, "not found"
     try:
-        return json.loads(p.read_text())
-    except Exception:
-        return None
+        raw = p.read_text(encoding="utf-8")
+    except Exception as e:
+        return None, f"unreadable ({type(e).__name__}: {e})"
+    try:
+        data = json.loads(raw)
+    except Exception as e:
+        return None, f"malformed JSON ({e})"
+    if not isinstance(data, dict):
+        return None, f"unexpected schema (top level is {type(data).__name__}, not an object)"
+    return data, None
+
+
+def _load_json(rel):
+    return _read_export(rel)[0]
 
 
 # --------------------------------------------------------------------------- #
@@ -2441,21 +2941,55 @@ def _export_path(rel):
     return _gcfg.RESULTS_DIR / rel
 
 
+# An explicit run identifier would be the right thing to stamp figures with, but
+# none of these exports writes one (see the protected-file request in the
+# changelog). These are the fields they DO carry that identify which experiment
+# a file is, so provenance names the run as precisely as the data allows. (U7)
+_RUN_ID_KEYS = ("experiment_id", "run_id", "experiment", "run", "uuid", "id")
+_EXPERIMENT_KEYS = ("family", "sequence")
+
+
+def _experiment_id(data) -> str | None:
+    data = data or {}
+    for k in _RUN_ID_KEYS:
+        if data.get(k) not in (None, ""):
+            return str(data[k])
+    # No prefix here: ui.provenance already renders this as `experiment=…`, and
+    # which key it came from is implied by the file name.
+    parts = [str(data[k]) for k in _EXPERIMENT_KEYS if data.get(k) not in (None, "")]
+    return " · ".join(parts) or None
+
+
 def _export_meta(rel, data) -> dict:
     """The provenance fields an export actually carries. Absent = absent."""
     data = data or {}
     return {"path": str(_export_path(rel)),
+            "experiment": _experiment_id(data),
             "split": data.get("split"),
             "n": data.get("n_scenarios") or data.get("n_shaded") or data.get("n_windows"),
             "seed": data.get("seed"), "version": data.get("version")}
 
 
 def missing_export(rel, what=""):
-    """Say which file is missing and which script writes it. Never substitute."""
+    """Name the file, what is wrong with it, and the script that writes it.
+
+    Re-probes the path so the message distinguishes a file that is absent from
+    one that is present but unreadable — "run the script" is the wrong advice for
+    a truncated file. Never substitutes a value. (§2.3)
+    """
+    _, problem = _read_export(rel)
+    problem = problem or "not usable"
     script = _EXPORT_SCRIPT.get(rel, "the phase2 runner that writes it")
-    ui.callout(f"{what + ' needs ' if what else 'Missing export: '}`{rel}`, which is "
-               f"produced by `{script}`. Nothing is shown here rather than an estimate.",
-               "Export not found", "limit")
+    lead = f"{what} needs " if what else "This page needs "
+    if problem == "not found":
+        detail = (f"`{rel}`, which is produced by `{script}`. Run it and reload; "
+                  f"nothing is shown here rather than an estimate.")
+        title = "Export not found"
+    else:
+        detail = (f"`{rel}`, which is present but {problem}. The dashboard will not "
+                  f"repair or regenerate it — re-run `{script}` to rewrite it.")
+        title = "Export unusable"
+    ui.callout(lead + detail, title, "limit")
 
 
 def missing_field(rel, key, what=""):
@@ -2464,6 +2998,28 @@ def missing_field(rel, key, what=""):
                f"{' for ' + what if what else ''}. Re-run `{script}` with a version that "
                f"writes it; the figure is shown as — rather than filled in.",
                "Missing field", "caveat")
+
+
+def require_keys(rel, data, keys, what="") -> bool:
+    """True when the export has the top-level keys a page needs.
+
+    A file that parses but carries a different shape than the page expects is an
+    unexpected schema, not a missing number, and it gets its own sentence. (§2.3)
+    """
+    if not isinstance(data, dict):
+        return False
+    absent = [k for k in keys if k not in data]
+    if not absent:
+        return True
+    script = _EXPORT_SCRIPT.get(rel, "its phase2 runner")
+    ui.callout(
+        f"`{rel}` parsed, but it does not have the top-level "
+        f"{'keys' if len(absent) > 1 else 'key'} "
+        f"{', '.join('`' + k + '`' for k in absent)} that {what or 'this page'} reads. "
+        f"The export schema has probably moved; re-run `{script}` or update the page "
+        f"to the new shape. Nothing is inferred from the fields that are present.",
+        "Unexpected export schema", "limit")
+    return False
 
 
 def _fmt(v, spec="{:.2f}", dash="—"):
@@ -2492,8 +3048,9 @@ def page_compare():
                   f"Every method on the same {_fmt(n_sub, '{:.0f}')} multi-peak validation "
                   f"curves.", "Testing")
 
-    if not tc:
-        missing_export(t_rel, "The tracker comparison")
+    if not tc or not require_keys(t_rel, tc, ("results", "split"), "the comparison table"):
+        if not tc:
+            missing_export(t_rel, "The tracker comparison")
         ui.callout("The table below is a recorded SNAPSHOT of an earlier run, kept so the "
                    "page is not blank. It is labelled as such and must not be quoted.",
                    "Snapshot, not a live export", "caveat")
@@ -2519,6 +3076,23 @@ def page_compare():
             continue
         rows.append((method_label(key), key, r))
     hyb = g(head_key)
+
+    # Keys the export carries that the label table does not know. They are shown,
+    # because hiding a row would hide a result, but they are shown as unknown —
+    # never folded into whichever family the key's text resembles. (U6)
+    unknown = [k for k in R if k not in _METHOD_LABELS]
+    for key in unknown:
+        r = g(key)
+        if r is not None:
+            rows.append((f"{UNKNOWN_VARIANT}: {key}", key, r))
+    if unknown:
+        ui.callout(
+            f"`{t_rel}` contains "
+            f"{', '.join('`' + str(k) + '`' for k in unknown)}, which this dashboard's "
+            f"variant table does not know. They are listed as unknown rather than "
+            f"assigned to a method family. Add them to `_METHOD_LABELS` once it is "
+            f"settled which variant each one is.",
+            "Unrecognised export keys", "caveat")
 
     pso_read, pso_best = _pso_readings(pso)
     pso_row = None
@@ -2685,8 +3259,9 @@ def page_relocation():
                   "Testing · Shading relocation")
     rel = "phase2/relocation_comparison_pole.json"
     R = _load_json(rel)
-    if not R:
-        missing_export(rel, "The relocation comparison")
+    if not R or not require_keys(rel, R, ("stats", "n_windows"), "the relocation table"):
+        if not R:
+            missing_export(rel, "The relocation comparison")
         ui.not_built("Drift and cloud relocation families",
                      "Only the pole single-jump family has been run. The drifting-pole "
                      "and cloud-transit families are planned and are not offered as "
@@ -2847,8 +3422,12 @@ def page_results():
     Pj = _load_json(p_rel)
     if not T:
         missing_export(t_rel, "The static result")
+    elif not require_keys(t_rel, T, ("results",), "the static rows"):
+        T = None
     if not D:
         missing_export(d_rel, "The dynamic result")
+    elif not require_keys(d_rel, D, ("results",), "the dynamic row"):
+        D = None
 
     head_key = "hybrid, bounded"
     static = ((T or {}).get("results") or {}).get(head_key, {}).get("multi_peak") or {}
@@ -2925,7 +3504,7 @@ def page_results():
         "arrival column. "
         "(5) All data is simulated; there are no field measurements behind any number "
         "here. "
-        "(6) The held-out generalisation split has not been evaluated — every figure on "
+        "(6) The held-out TEST split has not been evaluated — every figure on "
         "this page is a validation-split figure.",
         "Caveats that travel with these numbers", "caveat")
 
@@ -2963,6 +3542,8 @@ def page_benchset():
     d_rel = "phase2/dynamic_comparison_30-100_val.json"
     n_rel = "phase2/near_tie_screen.json"
     T, D, N = _load_json(t_rel), _load_json(d_rel), _load_json(n_rel)
+    if T and not require_keys(t_rel, T, ("results",), "the static counts"):
+        T = None
     if not T and not D:
         missing_export(t_rel, "The benchmark scenario set")
         return
@@ -3039,7 +3620,10 @@ def page_moving():
     dyj = _load_json(rel)
     if not dyj:
         missing_export(rel, "The dynamic comparison")
-    else:
+        dyj = None
+    elif not require_keys(rel, dyj, ("results", "split"), "the dynamic KPIs"):
+        dyj = None
+    if dyj:
         sh = (dyj.get("results") or {}).get("shaded" if shaded else "uniform") or {}
 
         def agg(m):
@@ -3053,7 +3637,7 @@ def page_moving():
         if hyb is None:
             missing_field(rel, hyb_key, "the headline efficiency")
         kp = [("Dynamic efficiency", f"{_fmt(hyb, '{:.3f}')}%",
-               f"{_METHOD_LABELS.get(hyb_key, hyb_key)} · ±{_fmt(se_of(hyb_key), '{:.3f}')}"
+               f"{method_label(hyb_key)} · ±{_fmt(se_of(hyb_key), '{:.3f}')}"
                f" · EN 50530 Seq {dyj.get('sequence', seq)}", "hero")]
         # PSO and P&O carry their own s.e., so a reader can see whether the gap
         # is separable rather than being shown a bare difference.
@@ -3332,9 +3916,19 @@ def page_sources():
         st.markdown(
             "- **Module parameters** — the CEC module database via `pvlib` "
             "(`retrieve_sam(\"CECMod\")`), pooled into `results/cec_pool.parquet`.\n"
-            "- **Validation modules** — the held-out half of that pool "
-            "(`gmppt.scenarios.split_modules`). The panel dropdown on Explore only offers "
-            "held-out modules, so nothing on screen was used to fit the model.\n"
+            f"- **Module split — three ways, not two.** `gmppt.dataset.module_split()` "
+            f"returns `train` ({_split_counts()['train']:,}), `val` "
+            f"({_split_counts()['val']:,}) and `test` ({_split_counts()['test']:,}). "
+            f"`test` is exactly `gmppt.scenarios.split_modules(pool)[1]`, the 20% "
+            f"reserve Phase 1 declared; `val` is carved out of the training modules "
+            f"under its own seed and is used freely.\n"
+            f"- **Validation modules** — everything this dashboard shows comes from "
+            f"`dataset.module_split().val`, the same set "
+            f"`phase2/p7_tracker_comparison.py --split val` runs on. "
+            f"{_VAL_WORDING}\n"
+            f"- **The test set is never opened here.** It is reached only through "
+            f"`p3_final_comparison.py --confirm-test`, which ledgers every opening. "
+            f"No code path in this dashboard reads it.\n"
             "- **Datasheet modules** — the Simulator's own presets and any numbers you type "
             "there. These are not CEC modules and are not used for any benchmark.\n"
             "- **Tracking methods** — P&O (`gmppt.tracking`), incremental conductance "
@@ -3410,10 +4004,18 @@ _PERSIST_KEYS = [
     "gm_showuns", "gm_pv", "gm_vop", "gm_rows", "gm_per", "gm_mount",
     "gm_depth2", "gm_width", "gm_G2", "gm_T2",
     "run_overlay", "mv_scen", "mv_show", "mv_mode", "saved_pick", "day_time",
+    "gm_anim", "a1_steps", "a1_view", "a1_built",
     "bench_preset", "bench_nsub", "bench_mstr", "bench_pstr", "bench_obj",
     "bench_baseG", "bench_T", "bench_scen_name",
-] + [f"bench_{f}" for f in sim.DS_FIELDS]
-_PERSIST_PREFIXES = ("bench_s", "day_win_", "day_mot_", "swp_")
+] + [f"bench_{f}" for f in sim.DS_FIELDS] + [
+    # The per-substring irradiance inputs, listed explicitly rather than matched
+    # by a "bench_s" prefix. That prefix also caught `bench_save` and
+    # `bench_scen_name`; pre-setting a BUTTON's value is an error Streamlit
+    # raises when the widget is created, which no try/except around the
+    # assignment can catch. 12 is the substring maximum the number_input allows.
+    f"bench_s{i}" for i in range(12)
+]
+_PERSIST_PREFIXES = ("day_win_", "day_mot_", "swp_")
 
 
 def _step_of(key):
