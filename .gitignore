@@ -13,6 +13,25 @@ venv/
 !/results/phase1_verification_log.md
 /results/figures/
 
+# ...except what the dashboard READS. Without these a deploy has no module
+# pool (FileNotFoundError on The panels), no trained seed, and every
+# benchmark page says "not generated yet". Git needs the directories
+# un-ignored before it can see the files inside them.
+!/results/cec_pool.parquet
+!/results/phase2/
+/results/phase2/*
+!/results/phase2/tracker_comparison_val.json
+!/results/phase2/pso_comparison_val.json
+!/results/phase2/dynamic_comparison_30-100_val.json
+!/results/phase2/dynamic_comparison_10-50_val.json
+!/results/phase2/relocation_comparison_pole.json
+!/results/phase2/near_tie_screen.json
+!/results/phase3/
+/results/phase3/*
+!/results/phase3/c3_two_stage_full.pkl
+# the Sandbox validation record on the Sources page (optional, small)
+!/results/v_*.csv
+
 # OS / editor
 .DS_Store
 .idea/

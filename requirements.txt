@@ -7,6 +7,13 @@ pvlib==0.15.2
 pyarrow==25.0.0
 matplotlib==3.11.1
 pytest==8.4.2
-streamlit
-plotly
-scikit-learn==1.8.0
+# The dashboard is written against Streamlit 1.63 (st.navigation position=
+# "hidden", st.container horizontal=, st.space, st.iframe) and Plotly 7. An
+# unpinned install on Streamlit Cloud pulled whatever was newest.
+streamlit==1.63.0
+plotly==7.0.0
+# The trained seed (results/phase3/c3_two_stage_full.pkl) was pickled under
+# scikit-learn 1.9.0 / joblib 1.5.3; an older scikit-learn refuses or
+# mis-reads the pickle and the Hybrid traces silently go missing.
+scikit-learn==1.9.0
+joblib==1.5.3

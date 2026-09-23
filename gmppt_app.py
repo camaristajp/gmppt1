@@ -5249,6 +5249,24 @@ def _make_page(key):
         # drawn from STAGES, with the stage's purpose as hover help (§7).
         ui.app_header({k: P.get(k) if _PAGE_FUNCS[k][0] else None for k in _PAGE_FUNCS},
                       SECTION_KEYS, key, journey=JOURNEY, stage_help=_STAGE_PURPOSE)
+        # A deploy that is missing the module pool cannot draw a single panel.
+        # Say so in a sentence, with the file list one click away, rather than
+        # dying in pd.read_parquet with a redacted traceback (Streamlit Cloud
+        # hides the message). Home and the Sandbox do not need the pool.
+        if key not in SANDBOX and key != "home" and not _gcfg.CEC_POOL.exists():
+            ui.unavailable(
+                "This deployment has no panel data",
+                "The module database the validated engine reads from is not part of "
+                "this copy of the app, so nothing on the workflow pages can be drawn. "
+                "The Sandbox still works.",
+                f"- Missing: `{_gcfg.CEC_POOL}`.\n"
+                f"- It is produced once by Phase 1 and must be committed alongside "
+                f"the app (see `.gitignore`: `!/results/cec_pool.parquet`). The "
+                f"benchmark pages also need `results/phase2/*_val.json`, "
+                f"`relocation_comparison_pole.json`, `near_tie_screen.json` and "
+                f"`results/phase3/c3_two_stage_full.pkl`.",
+                kind="limit")
+            return
         stage = _FLOW_STAGE.get(key)
         if stage:
             # Which stages this session has reached — the stepper's "done" marks.

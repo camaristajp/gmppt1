@@ -1,0 +1,65 @@
+{
+  "family": "pole",
+  "n_windows": 12,
+  "discarded": 0,
+  "settle_steps": 200,
+  "window_steps": 300,
+  "trigger_drop_frac": 0.05,
+  "stats": {
+    "P&O": {
+      "median": NaN,
+      "worst": NaN,
+      "reconv_frac": 0.0,
+      "energy_loss_pct": 63.77654357614179,
+      "se": 0.0
+    },
+    "InC": {
+      "median": NaN,
+      "worst": NaN,
+      "reconv_frac": 0.0,
+      "energy_loss_pct": 63.79574723095754,
+      "se": 0.0
+    },
+    "PSO": {
+      "median": NaN,
+      "worst": NaN,
+      "reconv_frac": 0.0,
+      "energy_loss_pct": 65.01777810197554,
+      "se": 0.0
+    },
+    "PSO, triggered reseed": {
+      "median": 47.5,
+      "worst": 61.0,
+      "reconv_frac": 1.0,
+      "energy_loss_pct": 3.70148721069688,
+      "se": 1.6258253537228655
+    },
+    "seed only": {
+      "median": NaN,
+      "worst": NaN,
+      "reconv_frac": 0.0,
+      "energy_loss_pct": 64.55563252581436,
+      "se": 0.0
+    },
+    "hybrid, never reseed": {
+      "median": NaN,
+      "worst": NaN,
+      "reconv_frac": 0.0,
+      "energy_loss_pct": 63.78211219588622,
+      "se": 0.0
+    },
+    "hybrid, triggered reseed": {
+      "median": 9.0,
+      "worst": 53.0,
+      "reconv_frac": 1.0,
+      "energy_loss_pct": 2.0159261241315156,
+      "se": 3.655285366576885
+    }
+  },
+  "criteria": {
+    "c1": true,
+    "c2": true,
+    "c3": true,
+    "c4": true
+  }
+}
