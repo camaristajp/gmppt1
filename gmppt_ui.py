@@ -26,6 +26,7 @@ from __future__ import annotations
 import datetime as _dt
 import html
 import os
+import re
 from typing import Iterable, Mapping, Sequence
 
 import plotly.graph_objects as go
@@ -203,6 +204,70 @@ def _inject_css(c: dict) -> None:
     .gm-tab-off {{ display: inline-block; padding: 10px 14px 9px 14px; font-size: 0.92rem;
         color: {c['text_faint']}; font-family: {FONTS['body']}; }}
     .gm-route {{ font-family: {FONTS['mono']}; font-size: 0.74rem; color: {c['text_muted']}; }}
+    /* The stage strip IS the workflow indicator: small, uppercase, one line,
+       with the current stage the only filled item (§5). */
+    [class*="st-key-gm-sec-"] a p, .gm-sec-on {{ font-family: {FONTS['mono']} !important;
+        font-size: 0.72rem !important; letter-spacing: 0.07em; text-transform: uppercase; }}
+    [class*="st-key-gm-sec-"] a p {{ color: {c['text_muted']} !important; }}
+    [class*="st-key-gm-sec-"] a {{ padding: 5px 9px !important; }}
+    .gm-sec-on {{ padding: 6px 10px; }}
+    .gm-stage-sep {{ color: {c['text_faint']}; font-size: 0.8rem; padding: 0 1px; }}
+    .gm-stage-gap {{ display: inline-block; width: 1px; height: 18px; margin: 0 10px;
+        background: {c['border_strong']}; vertical-align: middle; }}
+    /* narrower desktop: the strip must stay one line, so it gets tighter (§48) */
+    @media (max-width: 1240px) {{
+        [class*="st-key-gm-sec-"] a {{ padding: 5px 5px !important; }}
+        .gm-sec-on {{ padding: 6px 7px; }}
+        [class*="st-key-gm-sec-"] a p, .gm-sec-on {{ font-size: 0.66rem !important;
+            letter-spacing: 0.04em; }}
+        .gm-stage-sep {{ font-size: 0.7rem; padding: 0; }}
+        .gm-stage-gap {{ margin: 0 5px; }}
+        .st-key-gm-hdr-top {{ gap: 2px !important; }}
+    }}
+
+    /* ---------- stepper: the journey with done / current / next / later (§13–14) ---------- */
+    [class*="st-key-gm-step-"] {{ padding: 10px 14px; border-radius: {RADIUS['md']};
+        border: 1px solid transparent; gap: 2px !important; }}
+    [class*="st-key-gm-step-"].gm-next, [class*="st-key-gm-step-"]:has(.gm-st-next) {{
+        background: {c['surface']}; border-color: {c['teal']}; }}
+    [class*="st-key-gm-step-"]:has(.gm-st-current) {{ background: {c['teal_tint']}; }}
+    .gm-st {{ display: flex; align-items: baseline; gap: 12px; }}
+    .gm-st .g {{ font-family: {FONTS['mono']}; font-size: 0.9rem; width: 18px; text-align: center; }}
+    .gm-st .t {{ font-weight: 600; color: {c['text']}; font-size: 0.98rem; }}
+    .gm-st .p {{ color: {c['text_muted']}; font-size: 0.86rem; }}
+    .gm-st .s {{ font-family: {FONTS['mono']}; font-size: 0.66rem; letter-spacing: 0.07em;
+        text-transform: uppercase; color: {c['text_muted']}; margin-left: auto; }}
+    .gm-st-done .g {{ color: {c['teal']}; }}
+    .gm-st-current .g, .gm-st-current .s {{ color: {c['teal']}; font-weight: 700; }}
+    .gm-st-next .g, .gm-st-next .s {{ color: {c['amber_text']}; font-weight: 700; }}
+    .gm-st-later .g, .gm-st-later .t {{ color: {c['text_faint']}; }}
+    .gm-st-later .t {{ font-weight: 500; }}
+    [class*="st-key-gm-stepgo-"] a {{ padding: 4px 10px !important; border-radius: {RADIUS['sm']} !important;
+        text-decoration: none !important; }}
+    [class*="st-key-gm-stepgo-"] a p {{ margin: 0; font-size: 0.86rem; color: {c['text_muted']} !important; }}
+    [class*="st-key-gm-stepgo-"].gm-cta a, [class*="st-key-gm-stepgo-"]:has(+ .gm-cta) a {{ }}
+    .st-key-gm-stepcta a {{ background: {c['teal']} !important; padding: 8px 16px !important;
+        border-radius: {RADIUS['sm']} !important; text-decoration: none !important; }}
+    .st-key-gm-stepcta a p {{ margin: 0; color: #fff !important; font-weight: 600; font-size: 0.9rem; }}
+    .st-key-gm-stepcta a:hover {{ background: {c['teal_dark']} !important; }}
+
+    /* ---------- interactive tutorial: spotlight + adjacent popup (§6–8) ---------- */
+    #gm-tut-dim {{ position: fixed; inset: 0; z-index: 9998; pointer-events: none;
+        background: rgba(15, 20, 25, 0.5); }}
+    #gm-tut-ring {{ position: fixed; z-index: 9999; pointer-events: none; display: none;
+        border: 3px solid {c['teal']}; border-radius: 10px;
+        box-shadow: 0 0 0 4px rgba(255, 255, 255, 0.35); }}
+    .st-key-gm-tut-pop {{ position: fixed; top: 96px; right: 24px; z-index: 10001;
+        width: 340px; max-width: calc(100vw - 24px); background: {c['surface']};
+        border: 1px solid {c['border_strong']}; border-radius: 12px; padding: 14px 16px 12px 16px;
+        box-shadow: 0 14px 44px rgba(0, 0, 0, 0.28); gap: 6px !important; }}
+    .gm-tut-prog {{ font-family: {FONTS['mono']}; font-size: 0.68rem; letter-spacing: 0.08em;
+        text-transform: uppercase; color: {c['text_muted']}; }}
+    .gm-tut-title {{ font-family: {FONTS['display']}; font-weight: 700; font-size: 1.02rem;
+        color: {c['text']}; margin-top: 2px; }}
+    .gm-tut-body {{ font-size: 0.9rem; line-height: 1.5; color: {c['text_body']}; margin: 4px 0 6px 0; }}
+    .st-key-gm-tut-pop button {{ min-height: 34px; }}
+    .st-key-gm-tut-pop button:focus-visible {{ outline: 2px solid {c['amber']}; outline-offset: 2px; }}
 
     /* charts sit on cards, not on the page ground */
     [data-testid="stPlotlyChart"] {{ background: {c['surface']}; border-radius: {RADIUS['md']}; }}
@@ -278,7 +343,13 @@ def _inject_css(c: dict) -> None:
     .gm-kpi .k {{ font-family: {FONTS['mono']}; font-size: 0.7rem; letter-spacing: 0.07em;
         text-transform: uppercase; color: {c['text_muted']}; }}
     .gm-kpi .v {{ font-family: {FONTS['mono']}; font-size: 1.6rem; margin-top: 4px; color: {c['text']}; }}
+    .gm-kpi .v.text {{ font-family: {FONTS['display']}; font-size: 1.15rem; font-weight: 600;
+        line-height: 1.25; margin-top: 8px; }}
     .gm-kpi .n {{ font-size: 0.8rem; color: {c['text_muted']}; margin-top: 2px; }}
+    /* A term with hover help is marked, so a reader knows there is more to
+       read — the visible label still has to make sense on its own (§7). */
+    .gm-kpi .k.tip, .gm-tip {{ cursor: help;
+        border-bottom: 1px dotted {c['border_strong']}; }}
     .gm-kpi.good .v {{ color: {c['teal']}; }} .gm-kpi.bad .v {{ color: {c['red']}; }}
     .gm-kpi.hero {{ background: {c['teal']}; border-color: {c['teal']}; }}
     .gm-kpi.hero .k, .gm-kpi.hero .n {{ color: rgba(255,255,255,0.82); }}
@@ -323,6 +394,50 @@ def _inject_css(c: dict) -> None:
         font-size: 0.82rem; margin-bottom: 10px; }}
     .gm-sandbox b {{ font-family: {FONTS['mono']}; font-size: 0.68rem; letter-spacing: 0.06em;
         text-transform: uppercase; }}
+    .gm-tut-head {{ display: flex; align-items: baseline; justify-content: space-between;
+        gap: 12px; margin-bottom: 2px; }}
+    .gm-tut-head b {{ font-family: {FONTS['display']}; font-size: 1.02rem; color: {c['text']}; }}
+    .gm-tut-head span {{ font-family: {FONTS['mono']}; font-size: 0.7rem;
+        color: {c['text_muted']}; }}
+    .gm-chip {{ display: inline-flex; align-items: baseline; gap: 8px; flex-wrap: wrap;
+        padding: 4px 10px; border-radius: {RADIUS['pill']}; font-size: 0.78rem;
+        margin: 4px 0 2px 0; }}
+    .gm-chip b {{ font-weight: 600; }}
+    .gm-chip span {{ opacity: 0.85; }}
+    .gm-chip.ok {{ background: {c['teal_tint']}; color: {c['teal']}; }}
+    .gm-chip.warn {{ background: {c['amber_tint']}; color: {c['amber_text']}; }}
+    .gm-chip.mute {{ background: {c['muted_fill']}; color: {c['text_muted']}; }}
+    .gm-sechead {{ display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap;
+        margin: 0 0 8px 0; }}
+    .gm-sechead b {{ font-family: {FONTS['display']}; font-weight: 700;
+        font-size: 1.02rem; color: {c['text']}; }}
+    .gm-sechead .sub {{ font-size: 0.82rem; color: {c['text_muted']}; }}
+    /* substring state: peers, so identical cells (§17) */
+    .gm-subrow {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+        gap: 10px; }}
+    .gm-sub {{ display: flex; flex-direction: column; gap: 3px; padding: 10px 12px;
+        border: 1px solid {c['border']}; border-radius: {RADIUS['md']};
+        background: {c['surface']}; font-size: 0.86rem; color: {c['text_body']}; }}
+    .gm-sub b {{ font-family: {FONTS['mono']}; color: {c['teal']}; font-size: 0.9rem; }}
+    .gm-unavail {{ display: flex; flex-direction: column; gap: 3px; padding: 12px 14px;
+        border: 1px dashed {c['border_strong']}; border-radius: {RADIUS['md']};
+        background: {c['surface_alt']}; }}
+    .gm-unavail b {{ color: {c['text']}; font-size: 0.92rem; }}
+    .gm-unavail span {{ color: {c['text_muted']}; font-size: 0.85rem; line-height: 1.5; }}
+    /* A scientific caveat ("this cannot be called gated") is a stronger claim
+       than an absent file, so it keeps the amber the callouts use for limits. */
+    .gm-unavail.limit {{ border-style: solid; border-color: {c['amber']};
+        background: {c['amber_tint']}; }}
+    .gm-unavail.limit b {{ color: {c['amber_text']}; }}
+    .gm-flow {{ display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+        font-family: {FONTS['mono']}; font-size: 0.68rem; letter-spacing: 0.05em;
+        text-transform: uppercase; margin: 2px 0 12px 0; }}
+    .gm-flow span {{ color: {c['text_muted']}; }}
+    .gm-flow .on {{ color: {c['teal']}; font-weight: 700; }}
+    .gm-flow .sep {{ opacity: 0.4; }}
+    .gm-flow span[title] {{ cursor: help; }}
+    .gm-purpose {{ font-size: 0.86rem; color: {c['text_muted']};
+        margin: -6px 0 14px 0; }}
     .gm-animbadge {{ display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap;
         padding: 6px 11px; border-radius: {RADIUS['md']}; font-size: 0.78rem;
         margin-bottom: 8px; border: 1px solid {c['border']}; background: {c['surface_alt']};
@@ -346,7 +461,13 @@ def _inject_css(c: dict) -> None:
     .gm-next {{ display: flex; align-items: center; gap: 12px; }}
     .gm-next .tag {{ font-family: {FONTS['mono']}; font-size: 0.7rem; letter-spacing: 0.07em;
         text-transform: uppercase; color: {c['text_muted']}; }}
-    .gm-legend {{ font-family: {FONTS['mono']}; font-size: 0.72rem; color: {c['text_faint']}; }}
+    /* Notes under charts are read by ordinary readers, so they get body type at
+       a supporting size — not developer mono (§23). The mono face is kept for
+       the provenance stamp, which is a citation. */
+    .gm-legend {{ font-family: {FONTS['body']}; font-size: 0.82rem; line-height: 1.45;
+        color: {c['text_muted']}; margin: 4px 0 2px 0; }}
+    .gm-legend.gm-cite {{ font-family: {FONTS['mono']}; font-size: 0.72rem;
+        color: {c['text_faint']}; }}
     """
     st.markdown(f"<style>{css}</style>", unsafe_allow_html=True)
 
@@ -397,12 +518,89 @@ def section_label(text: str) -> None:
     st.markdown(f'<div class="gm-label">{_e(text)}</div>', unsafe_allow_html=True)
 
 
-def kpi(label: str, value: str, note: str = "", tone: str = "neutral") -> None:
-    """A metric card. tone: neutral | good | bad | hero (hero = the page's verdict, one per page)."""
+def section_head(title: str, sub: str = "") -> None:
+    """Heading for a block inside a page — an animation, a sub-analysis.
+
+    Styling comes from a class, never from an inline style attribute. The font
+    stack contains single quotes ("'Plus Jakarta Sans', ..."), so interpolating
+    it into style='...' closes the attribute early and Streamlit renders the
+    whole heading as literal text.
+    """
+    extra = f'<span class="sub">{_e(sub)}</span>' if sub else ""
+    st.markdown(f'<div class="gm-sechead"><b>{_e(title)}</b>{extra}</div>',
+                unsafe_allow_html=True)
+
+
+# --------------------------------------------------------------------------- #
+# Glossary (§7)
+#
+# Hover help for the terms a reader is not expected to arrive knowing. It is
+# deliberately short: a tooltip is a reminder, never the only place a thing is
+# explained, and a control whose visible label already says what it does does
+# not appear here.
+# --------------------------------------------------------------------------- #
+GLOSSARY: dict[str, str] = {
+    "GMPP": "Global maximum power point — the tallest peak on the current P–V "
+            "curve, as opposed to a local one.",
+    "true peak": "The most power this panel can give right now. A tracker that "
+                 "settles anywhere else is losing the difference.",
+    "V_oc": "Open-circuit voltage — the voltage with no current drawn.",
+    "P–V curve": "Power against terminal voltage. Shading puts steps and extra "
+                 "peaks in it.",
+    "substring": "A group of cells sharing one bypass diode. This dashboard "
+                 "also calls it a strip.",
+    "bypass diode": "A switch across a substring. When a shaded substring "
+                    "cannot carry the string current, it turns on and that "
+                    "substring drops out of the voltage sum.",
+    "control step": "One measurement the tracker spends. The cost axis in this "
+                    "work is steps, not seconds.",
+    "Dynamic efficiency": "Energy captured as a percentage of the energy "
+                          "available at the true peak, over the EN 50530 ramp.",
+    "Tracking efficiency": "Power held as a percentage of the power available "
+                           "at the true peak.",
+    "Sandbox": "Explore parameter changes without affecting benchmark results. "
+               "It uses the simplified engine.",
+    "Animation": "Builds an interactive explanation from this scenario. It does "
+                 "not change benchmark results.",
+    "Validation data": "Used for method comparison; not used to fit the model.",
+    "Exploratory": "A configuration you built yourself. Not a declared scenario "
+                   "set, so no figure from it is a benchmark result.",
+    "s.e.": "Standard error across scenarios — how much the figure would move "
+            "on another draw of the same kind.",
+    "near-tie": "Scenarios where two peaks are close enough that picking the "
+                "wrong one costs very little.",
+}
+
+
+def term_tip(text: str) -> str:
+    """The glossary entry for a label, or '' — matched whole-word, longest first."""
+    t = str(text)
+    if t in GLOSSARY:
+        return GLOSSARY[t]
+    for k in sorted(GLOSSARY, key=len, reverse=True):
+        if re.search(rf"(?<!\w){re.escape(k)}(?!\w)", t, re.I):
+            return GLOSSARY[k]
+    return ""
+
+
+def kpi(label: str, value: str, note: str = "", tone: str = "neutral",
+        tip: str = "") -> None:
+    """A metric card. tone: neutral | good | bad | hero (hero = the page's verdict, one per page).
+
+    An unfamiliar metric gets hover help from the glossary automatically; `tip`
+    overrides it. The visible label still has to stand on its own (§7).
+    """
     tone = tone if tone in ("neutral", "good", "bad", "hero") else "neutral"
+    tip = tip or term_tip(label)
+    attr = f' title="{_e(tip)}"' if tip else ""
+    cls = "k tip" if tip else "k"
+    # A phrase ("Across the strips") set at number size wraps into three lines
+    # and makes the card twice the height of its peers. Words get word size.
+    vcls = "v text" if (not any(ch.isdigit() for ch in str(value))
+                        and len(str(value)) > 8) else "v"
     st.markdown(
-        f'<div class="gm-kpi {tone}"><div class="k">{_e(label)}</div>'
-        f'<div class="v">{_e(value)}</div>'
+        f'<div class="gm-kpi {tone}"><div class="{cls}"{attr}>{_e(label)}</div>'
+        f'<div class="{vcls}">{_e(value)}</div>'
         + (f'<div class="n">{_e(note)}</div>' if note else "")
         + "</div>",
         unsafe_allow_html=True,
@@ -492,50 +690,71 @@ _LOGO = ('<svg width="28" height="28" viewBox="0 0 30 30" role="img" aria-label=
 
 
 def app_header(pages: dict, sections: dict, current: str, routes: dict | None = None,
-               theme_key: str = "gm_theme") -> None:
-    """The two-level header from the wireframe: wordmark, section tabs, page tabs.
+               theme_key: str = "gm_theme", journey: Sequence[str] = (),
+               stage_help: Mapping[str, str] | None = None) -> None:
+    """The two-level header: wordmark, the workflow stages, then the stage's pages.
 
     pages    {key: st.Page or None}   None = not built yet (shown greyed, "coming")
-    sections {"Explore": ["panels", "inside", "system"], ...}  first key = section landing
+    sections {"Understand": ["panels"], "Inspect": ["inside", "system"], ...}
+             first key = the page a stage lands on
     current  key of the page being shown
+    journey  the section names that form the workflow, in order. They are drawn
+             as UNDERSTAND → [INSPECT] → WATCH …, which is the persistent
+             "where am I?" (§5). Sections outside the journey (Sandbox) sit apart.
+    stage_help  one sentence per stage, shown on hover (§7)
     Use together with st.navigation(..., position="hidden")."""
     cur_sec = next((sec for sec, ks in sections.items() if current in ks), None)
+    journey = list(journey) or [s for s in sections]
+    help_of = stage_help or {}
     with st.container(key="gm-hdr"):
         with st.container(horizontal=True, vertical_alignment="center", gap="small", key="gm-hdr-top"):
             st.html(_LOGO, width="content")
             with st.container(key="gm-wordmark", width="content"):
                 st.page_link(pages["home"], label="GMPPT Bench")
-            st.html('<span style="display:inline-block;width:14px"></span>', width="content")
+            st.html('<span style="display:inline-block;width:10px"></span>', width="content")
+            first = True
             for sec, keys in sections.items():
                 slug = sec.lower().replace(" ", "-")
+                in_journey = sec in journey
+                if in_journey and not first:
+                    st.html('<span class="gm-stage-sep">→</span>', width="content")
+                if not in_journey:
+                    st.html('<span class="gm-stage-gap"></span>', width="content")
                 if sec == cur_sec:
-                    st.html(f'<span class="gm-sec-on">{_e(sec)}</span>', width="content")
+                    tip = f' title="{_e(help_of.get(sec, ""))}"' if help_of.get(sec) else ""
+                    st.html(f'<span class="gm-sec-on"{tip}>{_e(sec)}</span>', width="content")
                 else:
                     with st.container(key=f"gm-sec-{slug}", width="content"):
-                        st.page_link(pages[keys[0]], label=sec)
+                        st.page_link(pages[keys[0]], label=sec,
+                                     help=help_of.get(sec) or None)
+                first = first and not in_journey
             st.space("stretch")
             if routes and current in routes:
                 st.html(f'<span class="gm-route">{_e(routes[current])}</span>', width="content")
-            # Animations On/Off sits beside the theme control (§6). Off is a real
-            # setting, not a preference hint: the pages build no Plotly frames at
-            # all and fall back to their snapshot strips.
-            st.html('<span class="gm-route" style="padding-right:6px">Animations</span>',
-                    width="content")
-            st.segmented_control("Animations", ["On", "Off"], key="gm_anim",
+        # Second row: the current stage's pages on the left, the two global
+        # controls on the right. The controls live here rather than beside the
+        # stage strip so the strip never has to wrap around them.
+        with st.container(horizontal=True, gap=None, vertical_alignment="center",
+                          key="gm-hdr-tabs"):
+            for k in (sections.get(cur_sec) or []):
+                page = pages.get(k)
+                title = page.title if page is not None else k
+                if k == current:
+                    st.html(f'<span class="gm-tab-on">{_e(title)}</span>', width="content")
+                elif page is None:
+                    st.html(f'<span class="gm-tab-off">{_e(k)} · coming</span>', width="content")
+                else:
+                    with st.container(key=f"gm-tab-{k}", width="content"):
+                        st.page_link(page, label=title)
+            st.space("stretch")
+            # Animations On/Off (§30). Off is a real setting, not a hint: pages
+            # build no Plotly frames at all and fall back to snapshot strips.
+            st.segmented_control(
+                "Animations", ["On", "Off"], key="gm_anim", label_visibility="collapsed",
+                format_func=lambda v: "Animations on" if v == "On" else "Animations off",
+                help=GLOSSARY.get("Animation", "Turns the explanatory animations on or off."))
+            st.segmented_control("Theme", ["Light", "Dark"], key=theme_key,
                                  label_visibility="collapsed")
-            st.segmented_control("Theme", ["Light", "Dark"], key=theme_key, label_visibility="collapsed")
-        if cur_sec:
-            with st.container(horizontal=True, gap=None, key="gm-hdr-tabs"):
-                for k in sections[cur_sec]:
-                    page = pages.get(k)
-                    title = page.title if page is not None else k
-                    if k == current:
-                        st.html(f'<span class="gm-tab-on">{_e(title)}</span>', width="content")
-                    elif page is None:
-                        st.html(f'<span class="gm-tab-off">{_e(k)} · coming</span>', width="content")
-                    else:
-                        with st.container(key=f"gm-tab-{k}", width="content"):
-                            st.page_link(page, label=title)
 
 
 def persist_widget_state(keys: Iterable[str] = (), prefixes: Iterable[str] = ()) -> None:
@@ -583,7 +802,7 @@ def provenance(exports: Mapping[str, Mapping]) -> None:
             if v not in (None, ""):
                 bits.append(f"{label}={_e(str(v))}")
         rows.append(" · ".join(bits))
-    st.markdown('<div class="gm-legend">source: ' + "<br>source: ".join(rows) + "</div>",
+    st.markdown('<div class="gm-legend gm-cite">source: ' + "<br>source: ".join(rows) + "</div>",
                 unsafe_allow_html=True)
 
 
@@ -695,6 +914,221 @@ _BADGE_TEXT = {
 _BADGE_TONE = {"recorded": "ok", "live": "warn", "schematic": "mute", "sandbox": "warn"}
 
 
+_CHIP_TONE = {
+    "Validation data": "ok", "Benchmark result": "ok",
+    "Exploratory": "warn", "Sandbox": "warn", "Not benchmark": "warn",
+    "Planned": "mute", "Unavailable": "mute",
+}
+
+
+FLOW_STAGES = ["Understand", "Inspect", "Watch", "Compare", "Explore", "Results"]
+
+
+def flow_indicator(stage: str | None, purposes: Mapping[str, str] | None = None,
+                   here: str = "") -> None:
+    """Understand → Inspect → Watch → Compare → Explore → Results (§5).
+
+    Deliberately not a second navigation system: it is a one-line "where am I",
+    with the current stage highlighted. The header already handles going places.
+
+    `purposes` maps a stage to one sentence about what happens there, shown on
+    hover (§7). `here` is this page's own purpose, printed under the strip so
+    the answer to "what is this page for?" never depends on hovering.
+    """
+    if not stage:
+        return
+    parts = []
+    for i, s in enumerate(FLOW_STAGES):
+        cls = "on" if s == stage else ""
+        tip = (purposes or {}).get(s, "")
+        attr = f' title="{_e(tip)}"' if tip else ""
+        parts.append(f'<span class="{cls}"{attr}>{_e(s)}</span>')
+        if i < len(FLOW_STAGES) - 1:
+            parts.append('<span class="sep">→</span>')
+    strip = f'<div class="gm-flow">{"".join(parts)}</div>'
+    if here:
+        strip += f'<div class="gm-purpose">{_e(here)}</div>'
+    st.markdown(strip, unsafe_allow_html=True)
+
+
+def stepper(rows: Sequence[tuple], current: str | None = None,
+            done: Iterable[str] = ()) -> None:
+    """The journey as a list with done / current / next / later states (§13–14).
+
+    rows: [(key, page, title, purpose)] in workflow order. `current` is the
+    row the reader is on (None on Home, which is before the journey). `done`
+    are keys already visited this session. The first row that is neither done
+    nor current is NEXT and carries the one strong call to action; every other
+    row is a quiet link, and the current row is not a link at all — a reader
+    is never told to "open" the page they are looking at.
+
+    Each row is a keyed container (st-key-gm-step-<key>) so the tutorial can
+    point at the real thing.
+    """
+    done = set(done)
+    next_key = next((k for k, *_ in rows if k not in done and k != current), None)
+    glyph = {"done": "✓", "current": "●", "next": "→", "later": "○"}
+    label = {"done": "done", "current": "you are here", "next": "next", "later": ""}
+    for key, page, title, purpose in rows:
+        state = ("current" if key == current else "done" if key in done
+                 else "next" if key == next_key else "later")
+        with st.container(key=f"gm-step-{key}"):
+            a, b = st.columns([5, 1.3], vertical_alignment="center")
+            a.markdown(
+                f'<div class="gm-st gm-st-{state}"><span class="g">{glyph[state]}</span>'
+                f'<span class="t">{_e(title)}</span>'
+                f'<span class="p">{_e(purpose)}</span>'
+                f'<span class="s">{label[state]}</span></div>', unsafe_allow_html=True)
+            with b:
+                if state == "next" and page is not None:
+                    with st.container(key="gm-stepcta"):
+                        st.page_link(page, label="Start here →" if not done
+                                     else "Continue →")
+                elif state != "current" and page is not None:
+                    with st.container(key=f"gm-stepgo-{key}"):
+                        st.page_link(page, label="revisit" if state == "done" else "open")
+
+
+def _tut_script(selector: str, nonce: str) -> str:
+    """The browser side of the tutorial: spotlight the real control, then put
+    the popup next to it without covering it. Runs from a zero-height component
+    frame, which shares the page's origin and so can reach the page's DOM."""
+    sel = selector.replace("\\", "\\\\").replace("'", "\\'")
+    # The dim is a fixed full-screen sheet with a hole cut where the target is
+    # (clip-path, even-odd), plus a separate ring drawn over the hole. Neither
+    # touches the target's own styling, so it does not matter what stacking
+    # context the target sits in — a box-shadow spotlight on the target itself
+    # only dims the target's own block and leaves the rest of the page bright.
+    # Both layers ignore the pointer, so the real control stays usable.
+    return (
+        "<script>(function(){"
+        "const doc=window.parent.document;"
+        "doc.querySelectorAll('.gm-tut-target').forEach(e=>e.classList.remove('gm-tut-target'));"
+        "let dim=doc.getElementById('gm-tut-dim');"
+        "if(!dim){dim=doc.createElement('div');dim.id='gm-tut-dim';doc.body.appendChild(dim);}"
+        "let ring=doc.getElementById('gm-tut-ring');"
+        "if(!ring){ring=doc.createElement('div');ring.id='gm-tut-ring';doc.body.appendChild(ring);}"
+        f"const t=doc.querySelector('{sel}');"
+        "const pop=doc.querySelector('.st-key-gm-tut-pop');"
+        "if(!pop) return;"
+        "if(!t){dim.style.clipPath='none';ring.style.display='none';"
+        "pop.style.top='96px';pop.style.right='24px';pop.style.left='auto';return;}"
+        "t.classList.add('gm-tut-target');"
+        "t.scrollIntoView({block:'center',behavior:'smooth'});"
+        "function place(){"
+        "const r=t.getBoundingClientRect();"
+        "const pad=6, x1=r.left-pad, y1=r.top-pad, x2=r.right+pad, y2=r.bottom+pad;"
+        "dim.style.clipPath='polygon(evenodd, 0 0, 100% 0, 100% 100%, 0 100%, 0 0, '"
+        "+x1+'px '+y1+'px, '+x1+'px '+y2+'px, '+x2+'px '+y2+'px, '+x2+'px '+y1+'px, '+x1+'px '+y1+'px)';"
+        "ring.style.display='block';ring.style.left=x1+'px';ring.style.top=y1+'px';"
+        "ring.style.width=(x2-x1)+'px';ring.style.height=(y2-y1)+'px';"
+        "const pw=pop.offsetWidth||340, ph=pop.offsetHeight||190;"
+        "const vw=doc.documentElement.clientWidth, vh=doc.documentElement.clientHeight;"
+        "let top, left;"
+        "if(r.right+16+pw<=vw){left=r.right+16;top=r.top;}"
+        "else if(r.bottom+14+ph<=vh){left=r.left;top=r.bottom+14;}"
+        "else if(r.top-14-ph>=0){left=r.left;top=r.top-14-ph;}"
+        "else{left=Math.max(12,r.left-pw-16);top=r.top;}"
+        "left=Math.min(Math.max(12,left),vw-pw-12);"
+        "top=Math.min(Math.max(12,top),vh-ph-12);"
+        "pop.style.left=left+'px';pop.style.top=top+'px';pop.style.right='auto';}"
+        "place();setTimeout(place,350);setTimeout(place,900);setTimeout(place,1800);"
+        "window.parent.addEventListener('resize',place);"
+        "window.parent.addEventListener('scroll',place,true);"
+        f"}})();/*{nonce}*/</script>")
+
+
+_TUT_CLEAR = ("<script>(function(){const d=window.parent.document;"
+              "d.querySelectorAll('.gm-tut-target').forEach(e=>e.classList.remove('gm-tut-target'));"
+              "['gm-tut-dim','gm-tut-ring'].forEach(id=>{const e=d.getElementById(id);"
+              "if(e) e.remove();});})();</script>")
+
+
+def tutorial(steps: Sequence[Mapping]) -> None:
+    """Interactive onboarding: spotlight a REAL control, explain it, Next (§6–9).
+
+    steps: [{"target": css selector, "title": str, "body": str}, ...]. The
+    target is an element already on the page — nothing is drawn to stand in
+    for it, and it stays usable underneath. The popup is a compact fixed card
+    placed beside the target by _tut_script; Back / Next / Skip / Finish are
+    ordinary buttons, so the keyboard reaches them.
+
+    State: `gm_tut_step` is the step, `gm_tut_done` remembers Skip or Finish.
+    Reopening resets only the step, never anything else in the session.
+    """
+    import streamlit.components.v1 as components
+    steps = list(steps)
+    if st.session_state.get("gm_tut_done") or not steps:
+        if st.session_state.pop("gm_tut_clear", False):
+            components.html(_TUT_CLEAR, height=0)
+        return
+    i = int(st.session_state.get("gm_tut_step", 0))
+    i = max(0, min(i, len(steps) - 1))
+    step = steps[i]
+    last = i == len(steps) - 1
+    with st.container(key="gm-tut-pop"):
+        st.markdown(
+            f'<div class="gm-tut-prog">Step {i + 1} of {len(steps)}</div>'
+            f'<div class="gm-tut-title">{_e(step["title"])}</div>'
+            f'<p class="gm-tut-body">{_e(step["body"])}</p>', unsafe_allow_html=True)
+        a, b, d = st.columns([1, 1, 1.25])
+        if a.button("← Back", key="gm_tut_back", use_container_width=True,
+                    disabled=i == 0):
+            st.session_state["gm_tut_step"] = i - 1
+            st.rerun()
+        if b.button("Skip", key="gm_tut_skip", use_container_width=True,
+                    help="Close the tour. Reopen it any time from Home."):
+            st.session_state["gm_tut_done"] = True
+            st.session_state["gm_tut_clear"] = True
+            st.rerun()
+        if d.button("Finish" if last else "Next →", key="gm_tut_next",
+                    type="primary", use_container_width=True):
+            if last:
+                st.session_state["gm_tut_done"] = True
+                st.session_state["gm_tut_clear"] = True
+            else:
+                st.session_state["gm_tut_step"] = i + 1
+            st.rerun()
+    import time as _t
+    components.html(_tut_script(str(step.get("target", "")), f"{i}-{_t.time():.0f}"),
+                    height=0)
+
+
+def data_chip(label: str, note: str = "") -> None:
+    """One short line saying what kind of data the reader is looking at (§9).
+
+    Replaces the paragraphs of split/model bookkeeping that used to sit beside
+    the controls. The rule: the *class* of the data is user-facing and stays on
+    screen; how the app determines it is technical detail and goes in an
+    expander.
+    """
+    tone = _CHIP_TONE.get(label, "mute")
+    st.markdown(
+        f'<div class="gm-chip {tone}"><b>{_e(label)}</b>'
+        f'{f"<span>{_e(note)}</span>" if note else ""}</div>',
+        unsafe_allow_html=True)
+
+
+def unavailable(title: str, what: str, technical: str = "",
+                kind: str = "absent") -> None:
+    """The empty/missing state a reader should see (§14).
+
+    Plain sentence about what is not there, with the machinery — file names,
+    schema keys, which script writes them — folded away behind Technical
+    details. Never fabricates the missing value.
+
+    kind="limit" for the cases where the absence also bars a claim (a table that
+    must not be called gated); "absent" for a result that simply is not there.
+    """
+    cls = "gm-unavail limit" if kind == "limit" else "gm-unavail"
+    st.markdown(
+        f'<div class="{cls}"><b>{_e(title)}</b><span>{_e(what)}</span></div>',
+        unsafe_allow_html=True)
+    if technical:
+        with st.expander("Technical details", expanded=False):
+            st.markdown(technical)
+
+
 def anim_on() -> bool:
     """The global Animations On/Off switch (§5.2.4). Off => snapshot strips only."""
     return str(st.session_state.get("gm_anim", "On")) == "On"
@@ -750,7 +1184,8 @@ def trace_player(frames: Sequence[dict], series: Mapping[str, Mapping], *,
                  timeline: Mapping | None = None, key_frames: Sequence[int] = (),
                  height: int = 620, view: str = "together",
                  x_title: str = "terminal voltage  V", y_title: str = "power  W",
-                 static_traces: Sequence = (), frame_ms: int = 120) -> go.Figure:
+                 static_traces: Sequence = (), frame_ms: int = 120,
+                 step_prefix: str = "control step ") -> go.Figure:
     """The one shared player. Returns a figure; the caller renders it.
 
     Static background (the curve, the GMPP, the substring bands) is drawn ONCE in
@@ -759,10 +1194,31 @@ def trace_player(frames: Sequence[dict], series: Mapping[str, Mapping], *,
     in every frame is what blows it.
 
     `frames` follows the Update 3 schema; fields a frame omits are not drawn.
+
+    A frame's `step` may be a string when the axis is stages rather than control
+    steps (A2 walks probe → probe → decision), in which case `step_prefix` says
+    so. A frame may also carry a `title`, shown above the plot while that frame
+    is current — the only way to narrate a staged animation without a callback.
+
+    A series or a static trace may declare `panel="current"`, which puts it on a
+    second row sharing the voltage axis (A3 needs P–V and I–V to move together;
+    two figures could drift apart on the slider).
     """
-    fig = go.Figure()
+    two = (any((series[nm] or {}).get("panel") == "current" for nm in series)
+           or any(getattr(t, "_gm_panel", None) == "current" for t in static_traces))
+    if two:
+        from plotly.subplots import make_subplots
+        fig = make_subplots(rows=2, cols=1, shared_xaxes=True,
+                            vertical_spacing=0.06, row_heights=[0.62, 0.38])
+    else:
+        fig = go.Figure()
+
+    def _row(obj):
+        return 2 if (getattr(obj, "_gm_panel", None) == "current"
+                     or (isinstance(obj, dict) and obj.get("panel") == "current")) else 1
+
     for t in static_traces:
-        fig.add_trace(t)
+        fig.add_trace(t, row=_row(t), col=1) if two else fig.add_trace(t)
     n_static = len(fig.data)
 
     names = list(series)
@@ -771,18 +1227,25 @@ def trace_player(frames: Sequence[dict], series: Mapping[str, Mapping], *,
     idx = {}
     for nm in names:
         spec = series[nm]
+        row = _row(spec)
         trail = (first.get("trails") or {}).get(nm) or []
-        fig.add_trace(go.Scatter(
+        tr = go.Scatter(
             x=[p[0] for p in trail], y=[p[1] for p in trail], mode="lines",
             line=dict(color=spec.get("color", "#888"), width=1.4, dash="dot"),
-            opacity=0.55, showlegend=False, hoverinfo="skip", name=f"{nm} trail"))
+            opacity=0.55, showlegend=False, hoverinfo="skip", name=f"{nm} trail")
         mk = (first.get("markers") or {}).get(nm)
-        fig.add_trace(go.Scatter(
+        mt = go.Scatter(
             x=[mk["V"]] if mk else [], y=[mk["P"]] if mk else [], mode="markers",
             marker=dict(color=spec.get("color", "#888"), size=12,
                         symbol=spec.get("symbol", "circle"),
                         line=dict(color="#ffffff", width=1)),
-            name=nm))
+            name=nm)
+        if two:
+            fig.add_trace(tr, row=row, col=1)
+            fig.add_trace(mt, row=row, col=1)
+        else:
+            fig.add_trace(tr)
+            fig.add_trace(mt)
         idx[nm] = (n_static + len(idx) * 2, n_static + len(idx) * 2 + 1)
 
     order = [i for pair in idx.values() for i in pair]
@@ -795,7 +1258,12 @@ def trace_player(frames: Sequence[dict], series: Mapping[str, Mapping], *,
             data.append(go.Scatter(x=[p[0] for p in trail], y=[p[1] for p in trail]))
             data.append(go.Scatter(x=[mk["V"]] if mk else [],
                                    y=[mk["P"]] if mk else []))
-        plotly_frames.append(go.Frame(name=str(f.get("step")), data=data, traces=order))
+        kw = {}
+        if f.get("title"):
+            kw["layout"] = dict(title=dict(text=str(f["title"]), x=0.02,
+                                           font=dict(size=13)))
+        plotly_frames.append(go.Frame(name=str(f.get("step")), data=data,
+                                      traces=order, **kw))
     fig.frames = plotly_frames
 
     steps = [dict(method="animate", label=str(f.get("step")),
@@ -806,11 +1274,28 @@ def trace_player(frames: Sequence[dict], series: Mapping[str, Mapping], *,
     fig.update_layout(
         updatemenus=_speed_buttons(frame_ms),
         sliders=[dict(active=0, x=0, y=-0.02, len=1.0, pad=dict(t=34, b=8),
-                      currentvalue=dict(prefix="control step ", font=dict(size=12)),
+                      currentvalue=dict(prefix=step_prefix, font=dict(size=12)),
                       steps=steps)])
-    style_fig(fig, height=height, x_title=x_title, y_title=y_title)
+    if frames and frames[0].get("title"):
+        fig.update_layout(title=dict(text=str(frames[0]["title"]), x=0.02,
+                                     font=dict(size=13)))
+    style_fig(fig, height=height)
+    if two:
+        # only the lower panel carries the shared voltage axis label
+        fig.update_yaxes(title_text=y_title, row=1, col=1)
+        fig.update_yaxes(title_text="current  A", row=2, col=1)
+        fig.update_xaxes(title_text=x_title, row=2, col=1)
+    else:
+        fig.update_xaxes(title_text=x_title)
+        fig.update_yaxes(title_text=y_title)
     fig.update_layout(legend=dict(orientation="h", y=1.02, x=0.42))
     return fig
+
+
+def panel_trace(trace: go.Scatter, panel: str = "current") -> go.Scatter:
+    """Tag a static trace for trace_player's second panel (A3)."""
+    trace._gm_panel = panel
+    return trace
 
 
 def curve_morph(curves: Sequence[Mapping], labels: Sequence[str], *,
@@ -851,6 +1336,31 @@ def curve_morph(curves: Sequence[Mapping], labels: Sequence[str], *,
     return fig
 
 
+def curve_strip(curves: Sequence[Mapping], labels: Sequence[str],
+                picks: Sequence[int], *, height: int = 230,
+                key: str | None = None) -> None:
+    """The reduced-motion fallback for curve_morph: the key curves side by side."""
+    picks = [k for k in picks if 0 <= k < len(curves)]
+    if not picks:
+        return
+    cols = st.columns(len(picks), gap="small")
+    for col, k in zip(cols, picks):
+        cur = curves[k]
+        fig = go.Figure(go.Scatter(x=cur["V"], y=cur["P"], mode="lines",
+                                   line=dict(color=LIGHT["teal"], width=2.5)))
+        g = cur.get("gmpp") or {}
+        if g:
+            fig.add_trace(go.Scatter(x=[g.get("V")], y=[g.get("P")], mode="markers",
+                                     marker=dict(symbol="star", size=12,
+                                                 color=PEAK_COLORS["gmpp"])))
+        style_fig(fig, height=height)
+        fig.update_layout(showlegend=False, margin=dict(l=34, r=8, t=26, b=26),
+                          title=dict(text=str(labels[k]) if k < len(labels) else "",
+                                     font=dict(size=11)))
+        with col:
+            show_chart(fig, key=f"{key or 'curves'}-{k}")
+
+
 def snapshot_strip(frames: Sequence[dict], key_frames: Sequence[int],
                    captions: Sequence[str] = (), *, static_traces: Sequence = (),
                    series: Mapping[str, Mapping] | None = None,
@@ -878,8 +1388,11 @@ def snapshot_strip(frames: Sequence[dict], key_frames: Sequence[int],
                     marker=dict(color=spec.get("color", "#888"), size=11,
                                 symbol=spec.get("symbol", "circle"))))
         style_fig(fig, height=height, x_title="", y_title="")
+        # A staged animation names its own frames; a trajectory replay is
+        # numbered by control step. Use whichever the frame carries.
+        head = f.get("title") or f"step {f.get('step')}"
         fig.update_layout(showlegend=False, margin=dict(l=30, r=8, t=26, b=26),
-                          title=dict(text=f"step {f.get('step')}", font=dict(size=11)))
+                          title=dict(text=str(head), font=dict(size=11)))
         with col:
             show_chart(fig, key=f"{key or 'snap'}-{k}")
             cap = captions[picks.index(k)] if picks.index(k) < len(captions) else ""
@@ -923,7 +1436,7 @@ def anim_budget_note(measured: Mapping, stride: int = 1, build_s: float | None =
     bits.append(f"{measured.get('figure_json_mb', '—')} MB figure JSON")
     if build_s is not None:
         bits.append(f"built in {build_s:.2f} s")
-    st.markdown(f'<div class="gm-legend">{_e(" · ".join(bits))}</div>',
+    st.markdown(f'<div class="gm-legend gm-cite">{_e(" · ".join(bits))}</div>',
                 unsafe_allow_html=True)
 
 
@@ -978,10 +1491,13 @@ def add_reference_lines(fig: go.Figure, x: Iterable, unshaded: Iterable | None =
     return fig
 
 
-def mark_gmpp(fig: go.Figure, v: float, p: float, label: str = "true peak") -> go.Figure:
+def mark_gmpp(fig: go.Figure, v: float, p: float, label: str = "true peak",
+              textposition: str = "top right") -> go.Figure:
+    """textposition: pass "top left" when the peak sits near the right edge, or
+    the label runs off the plot."""
     fig.add_trace(go.Scatter(x=[v], y=[p], mode="markers+text", name=label,
                              marker=dict(color=PEAK_COLORS["gmpp"], size=12),
-                             text=[f"{label} · {p:.1f} W"], textposition="top right",
+                             text=[f"{label} · {p:.1f} W"], textposition=textposition,
                              textfont=dict(family="IBM Plex Mono, monospace", color=PEAK_COLORS["gmpp"])))
     return fig
 

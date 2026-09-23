@@ -72,9 +72,14 @@ def test_ui_helpers_are_additive_only():
     import inspect
     assert list(inspect.signature(ui.style_fig).parameters) == [
         "fig", "height", "y_title", "x_title"], "style_fig signature changed"
-    assert list(inspect.signature(ui.app_header).parameters) == [
-        "pages", "sections", "current", "routes", "theme_key"], \
-        "app_header signature changed"
+    # Additive means the original parameters stay first and unchanged; new
+    # keyword parameters with defaults may follow (journey, stage_help).
+    params = inspect.signature(ui.app_header).parameters
+    assert list(params)[:5] == ["pages", "sections", "current", "routes", "theme_key"], \
+        "app_header's original signature changed"
+    for extra in list(params)[5:]:
+        assert params[extra].default is not inspect.Parameter.empty, \
+            f"app_header gained a REQUIRED parameter: {extra}"
 
 
 # --------------------------------------------------------------------------- #
@@ -181,7 +186,10 @@ def test_T14_demo_module_is_in_val_and_far_from_train():
 def test_T14_load_time_assertion_exists_and_blocks_rendering():
     """U1.3: a non-validation module must stop the page, not caveat it."""
     assert "def assert_val_modules" in SRC
-    assert "Module split violation" in SRC
+    # the guard now speaks to the reader ("Wrong data set") and keeps the split
+    # machinery under Technical details (§24)
+    assert '"Wrong data set"' in SRC
+    assert "not validation data, so nothing" in SRC
     assert SRC.count("assert_val_modules(") >= 3, \
         "expected the guard on the dropdown and the demo, plus its definition"
     # the guard must be used as a gate, i.e. followed by a return
@@ -189,20 +197,27 @@ def test_T14_load_time_assertion_exists_and_blocks_rendering():
 
 
 def test_T14_unseen_check_panel():
-    """U1.5: split summary, live membership test, nearest training module."""
-    assert "def _unseen_check" in SRC
-    assert "in training set" in SRC
-    assert "closest module the model was trained on" in SRC
-    assert "test not shown here" in SRC
-    # and the honest note about what it verifies against (the sentence is split
-    # across source lines, so match the tail)
-    assert "not record one" in SRC
+    """U1.5 as revised by §8/§10: the membership check still runs and the facts
+    are still recorded — but the reader sees one line, with the split summary and
+    the nearest training module moved into Technical details."""
+    import ast
+    fn = next(n for n in ast.walk(ast.parse(SRC))
+              if isinstance(n, ast.FunctionDef) and n.name == "_unseen_check")
+    body = ast.get_source_segment(SRC, fn) or ""
+    # the check itself
+    assert "_train_module_names()" in body, "membership must still be resolved live"
+    assert "Wrong data set" in body, "a training module must still be flagged"
+    # what the reader sees
+    assert 'ui.data_chip("Validation data"' in body
+    # what is kept for reproducibility, out of the way
+    assert 'st.expander("Technical details"' in body
+    for fact in ("_split_counts()", "_nearest_train(name)", "module_split()"):
+        assert fact in body, f"{fact} dropped from Technical details"
 
 
 def test_T14_wording_never_calls_validation_modules_held_out():
     """U1.6: 'held-out' and 'never seen' belong to the test set only."""
-    assert "_VAL_WORDING" in SRC
-    assert "Validation module — not used to fit the model" in SRC
+    assert 'ui.data_chip("Validation data"' in SRC
     for i, line in enumerate(SRC.splitlines(), 1):
         stripped = line.lstrip()
         if stripped.startswith("#"):
@@ -328,16 +343,24 @@ def test_pso_readings_come_from_an_evaluation_field():
 # --------------------------------------------------------------------------- #
 # Pure helpers the labels depend on
 # --------------------------------------------------------------------------- #
-def _load_helpers(extra=()):
-    """Import the dashboard's pure helpers without executing the Streamlit app."""
+def _load_helpers(extra=(), consts=()):
+    """Import the dashboard's pure helpers without executing the Streamlit app.
+
+    `consts` names module-level assignments to carry over — a default argument
+    is evaluated when the function is defined, so a helper whose signature
+    mentions a module constant cannot be exec'd without it.
+    """
     import ast
     import numpy as np
     tree = ast.parse(SRC)
     wanted = {"geometry_of", "geometry_label", "_key"} | set(extra)
+    consts = set(consts)
     ns = {"np": np}
-    mod = ast.Module(body=[n for n in tree.body
-                           if isinstance(n, ast.FunctionDef) and n.name in wanted],
-                     type_ignores=[])
+    body = [n for n in tree.body
+            if (isinstance(n, ast.FunctionDef) and n.name in wanted)
+            or (isinstance(n, ast.Assign)
+                and any(getattr(t, "id", None) in consts for t in n.targets))]
+    mod = ast.Module(body=body, type_ignores=[])
     exec(compile(mod, "<helpers>", "exec"), ns)
     return ns
 
@@ -453,7 +476,13 @@ def test_relocation_export_has_no_gate_counts():
     d = json.loads((ROOT / "results/phase2/relocation_comparison_pole.json").read_text())
     assert "gates" not in d and "gate_counts" not in d
     assert set(d["criteria"]) == {"c1", "c2", "c3", "c4"}
-    assert "Gate counts are not in this export" in SRC
+    # §14 moved the file/field specifics into Technical details; the refusal to
+    # call the table gated stays where the reader sees it.
+    assert '"Not presentable as gated"' in SRC
+    assert "cannot be described as gated" in SRC
+    assert 'kind="limit"' in SRC, "the caveat must keep the limit tone"
+    assert "per-gate G1–G6 pass/discard counts" in SRC, \
+        "what is absent must still be recorded for a maintainer"
 
 
 def test_no_hardcoded_relocation_prose():
@@ -660,8 +689,242 @@ def test_gm_anim_defaults_on_and_persists():
         "gm_anim must be in the widget-persistence list"
 
 
+# --------------------------------------------------------------------------- #
+# A2 / A3 — the animations that must agree with the engine
+# --------------------------------------------------------------------------- #
+def test_A2_probe_accounting_is_stated_not_guessed():
+    """§8: five PROBE_FRACTIONS and a report saying six are both right, about
+    different boundaries. The runtime is the source of truth for each."""
+    from gmppt.features import PROBE_FRACTIONS
+    from gmppt import hybrid, model
+    assert len(PROBE_FRACTIONS) == 5
+    assert hybrid.SEED_PROBE_COST == len(PROBE_FRACTIONS), \
+        "the seed's charged control steps are the feature probes"
+    assert model.EXPECTED_PROBES == len(PROBE_FRACTIONS) + 1, \
+        "the model's serving cost adds the landing at k*V_oc"
+    # and the dashboard says so rather than picking a side
+    assert "not a sixth probe" in SRC
+    assert "SEED_PROBE_COST = hyb.SEED_PROBE_COST" in SRC or \
+           "SEED_PROBE_COST" in SRC
+
+
+def test_A2_never_draws_a_safety_stage():
+    """§9: make_hybrid does not call the fallback, so no stage may claim it."""
+    import inspect
+    from gmppt import hybrid
+    src = inspect.getsource(hybrid.make_hybrid)
+    assert "fallback" not in src, \
+        "if make_hybrid ever calls the fallback, A2 must grow a safety stage"
+    import ast
+    fn = next(n for n in ast.walk(ast.parse(SRC))
+              if isinstance(n, ast.FunctionDef) and n.name == "_a2_stage_frames")
+    body = ast.get_source_segment(SRC, fn) or ""
+    assert "safety" not in body.lower() and "fallback" not in body.lower()
+
+
+def test_A2_stages_come_from_the_recorded_history():
+    """§9: stage 1 uses v_hist[:SEED_PROBE_COST], not the declared fractions."""
+    import ast
+    fn = next(n for n in ast.walk(ast.parse(SRC))
+              if isinstance(n, ast.FunctionDef) and n.name == "_a2_stage_frames")
+    body = ast.get_source_segment(SRC, fn) or ""
+    assert 'r["v_hist"]' in body, "probes must be read from the recorded run"
+    assert "Recorded probes differ" in body, "a mismatch must raise the caveat"
+    assert 'seed["proba"]' in body and 'seed["v_seed"]' in body
+
+
+def test_A3_detects_the_switches_the_engine_reports():
+    """§10: on a scenario where a bypass diode really does switch, _a3_sweep must
+    find it — and find it at the voltage the engine puts it at."""
+    import numpy as np
+    import pandas as pd
+    from pvlib import pvsystem
+    from gmppt import config as gcfg, device as eng
+    from gmppt.dataset import module_split
+
+    h = _load_helpers({"_diode_state", "_a3_sweep", "_key"}, {"_A3_FRAMES"})
+    name = sorted(module_split().val)[0]
+    r = pvsystem.retrieve_sam("CECMod").T.loc[name]
+    num = lambda k: float(pd.to_numeric(r[k]))
+    mp = eng.ModuleParams(name=name, N_s=int(num("N_s")), alpha_sc=num("alpha_sc"),
+                          a_ref=num("a_ref"), I_L_ref=num("I_L_ref"),
+                          I_o_ref=num("I_o_ref"), R_sh_ref=num("R_sh_ref"),
+                          R_s=num("R_s"), Adjust=num("Adjust"))
+    irr = [910.0, 300.0, 600.0]                    # a shadow deep enough to switch
+    T = 43.0
+    c = eng.module_iv(mp, irr, T, bd=gcfg.breakdown())
+    V, I, P = c["V"], c["I"], c["P"]
+    m = V >= 0
+    o = np.argsort(V[m])
+    det = {"V": V[m][o], "I": I[m][o], "P": P[m][o],
+           "voc": float(V[m].max()), "n_peaks": eng.analyse(c)["n_peaks"],
+           "gmpp": eng.analyse(c)["gmpp"]}
+
+    # the element curves _substring_curves would have cached
+    bd, bp = gcfg.breakdown(), eng.Bypass(temp_c=T)
+    n_sub = gcfg.N_SUBSTRINGS
+    base = mp.N_s // n_sub
+    counts = [base] * n_sub
+    for k in range(mp.N_s - base * n_sub):
+        counts[k] += 1
+    curves = []
+    for entry, cnt in zip(irr, counts):
+        sub = eng.scale_to_substring(mp, cnt / mp.N_s)
+        v, ie = eng.substring_element_iv(sub, float(entry), T, bd, bp)
+        curves.append(([float(x) for x in v], [float(x) for x in ie]))
+    clamp = float(bp.clamp_voltage)
+    h["_substring_curves"] = lambda *_a, **_k: (curves, clamp)
+    h["np"] = np
+
+    frames, switches = h["_a3_sweep"](name, irr, T, det, clamp)
+
+    assert len(frames) == 60
+    assert abs(frames[0]["v"]) < 1e-9, "first frame must be V = 0"
+    assert abs(frames[-1]["v"] - det["voc"]) < 1e-6, "last frame must be V_oc"
+    assert switches, "this scenario does switch — the sweep must find it"
+    # a switch is reported only where the state vector actually changed
+    for k in range(1, len(frames)):
+        changed = frames[k]["state"] != frames[k - 1]["state"]
+        assert changed == (k in switches), \
+            f"frame {k}: state changed={changed} but reported={k in switches}"
+    # P–V and I–V stay on the same index
+    for f in frames:
+        assert abs(f["p"] - f["v"] * f["i"]) < max(1.0, 0.02 * abs(f["p"])), \
+            "power, voltage and current must describe one operating point"
+
+
+def test_A3_shares_one_bypass_rule_with_the_table():
+    """§10: the animation may not carry its own copy of the diode rule."""
+    assert SRC.count("clamp + 0.2") == 1, \
+        "the bypass threshold must exist in exactly one place (_diode_state)"
+    assert "_diode_state(vk, clamp)" in SRC, "the table reads it through the rule"
+    assert "_diode_state(x, clamp)" in SRC, "A3 reads it through the same rule"
+
+
+# --------------------------------------------------------------------------- #
+# UI copy cleanup and UX scaffolding
+# --------------------------------------------------------------------------- #
+def test_the_reported_debug_block_is_gone():
+    """§8: the validation/debug panel the user screenshotted must not be in the
+    normal UI. Its facts live in an expander now, so the phrasing that made it
+    read like a developer console is what must be absent."""
+    banned = [
+        "in training set",
+        "closest module the model was trained on",
+        "used for method comparison. The held-out test set is not shown",
+        "the model file does not\n",
+        "compares against the split function",
+        "Rows (strings)",
+        "Validation module — not used to fit the model",
+        "z-scored parameter distance",
+    ]
+    for phrase in banned:
+        assert phrase not in SRC, f"debug copy still present: {phrase!r}"
+    assert "_VAL_WORDING" not in SRC, \
+        "the long validation sentence should be replaced by ui.data_chip"
+
+
+def test_user_facing_components_exist():
+    import gmppt_ui as ui
+    for name in ("data_chip", "unavailable", "stepper", "tutorial", "section_head",
+                 "term_tip"):
+        assert callable(getattr(ui, name)), f"missing UI component {name}"
+    assert ui.FLOW_STAGES == ["Understand", "Inspect", "Watch", "Compare",
+                              "Explore", "Results"]
+
+
+def _stages():
+    """The one workflow table, read from the source as data."""
+    import ast
+    tree = ast.parse(SRC)
+    stages = next(ast.literal_eval(n.value) for n in tree.body
+                  if isinstance(n, ast.Assign)
+                  and getattr(n.targets[0], "id", "") == "STAGES")
+    sandbox = next(ast.literal_eval(n.value) for n in tree.body
+                   if isinstance(n, ast.Assign)
+                   and getattr(n.targets[0], "id", "") == "SANDBOX")
+    return stages, sandbox
+
+
+def test_one_workflow_table_drives_everything():
+    """§3: one authoritative page→stage mapping, used by header, eyebrow,
+    footer, stepper, tutorial and tests alike."""
+    stages, sandbox = _stages()
+    names = [s for s, _ in stages]
+    import gmppt_ui as ui
+    assert names == ui.FLOW_STAGES, "the header strip and the stage list must agree"
+    pages = [k for _, ks in stages for k in ks]
+    assert len(pages) == len(set(pages)), "a page belongs to exactly one stage"
+    assert not set(pages) & set(sandbox), "Sandbox pages carry no journey stage"
+    # nothing a reader sees may use the old section names as a stage. Code
+    # comments are not scanned; user-facing strings are.
+    import ast
+    strings = [n.value for n in ast.walk(ast.parse(SRC))
+               if isinstance(n, ast.Constant) and isinstance(n.value, str)]
+    for stale in ("Explore · Inside a panel", "Explore · The panels",
+                  "Testing · ", "sent to Testing", "all of Testing",
+                  "Testing benchmarks", "Testing reads", "Simulator · Set up"):
+        hits = [s for s in strings if stale in s and len(s) < 400]
+        assert not hits, f"stale navigation vocabulary {stale!r}: {hits[:2]}"
+    # and no page_intro still names a header section as its eyebrow
+    import re
+    for m in re.finditer(r'ui\.page_intro\([\s\S]*?"(Testing|The data|Simulator)"\)', SRC):
+        raise AssertionError(f"eyebrow still uses a section name: {m.group(0)[-40:]}")
+
+
+def test_every_journey_page_eyebrow_names_its_stage():
+    """§4: the eyebrow says INSPECT · Inside a panel, never a header section."""
+    import re
+    stages, sandbox = _stages()
+    stage_of = {k: s for s, ks in stages for k in ks}
+    for m in re.finditer(r'ui\.page_intro\(\s*"([^"]+)"[\s\S]*?"([A-Z][a-z]+) · ', SRC):
+        title, stage = m.group(1), m.group(2)
+        assert stage in dict(stages) or stage == "Sandbox", \
+            f"{title!r} has eyebrow stage {stage!r}, which is not a workflow stage"
+    assert '"Inspect · Inside a panel"' in SRC
+
+
+def test_tutorial_targets_real_controls_only():
+    """§6: every step points at an element the page really draws."""
+    h = _load_helpers({"_tutorial_steps"}, {"STAGES"})
+    h["P"] = {}
+    h["_PAGE_PURPOSE"] = {}
+    steps = h["_tutorial_steps"]()
+    assert len(steps) == 7, "seven steps (§7)"
+    for s in steps:
+        assert s["target"].startswith(".st-key-"), s
+        key = s["target"].replace(".st-key-", "")
+        assert (key == "hero-primary a" or key.startswith("gm-step-")), s
+    # the stepper rows the tour points at must be stages of the journey
+    stage_pages = {ks[0] for _, ks in _stages()[0]}
+    for s in steps[1:]:
+        assert s["target"].replace(".st-key-gm-step-", "") in stage_pages, s
+
+
+def test_tutorial_state_is_remembered():
+    assert "gm_tut_done" in SRC and "gm_tut_step" in SRC
+    assert "Show tutorial again" in SRC, "the tutorial must be reopenable (§6)"
+
+
+def test_missing_data_states_lead_with_plain_language():
+    """§14: the reader gets a sentence; file names go under Technical details."""
+    assert "ui.unavailable(" in SRC
+    assert "Results unavailable" in SRC
+    import ast
+    tree = ast.parse(SRC)
+    for name in ("missing_export", "missing_field", "require_keys"):
+        fn = next(n for n in ast.walk(tree)
+                  if isinstance(n, ast.FunctionDef) and n.name == name)
+        src = ast.get_source_segment(SRC, fn) or ""
+        assert "ui.unavailable(" in src, f"{name} must use the plain unavailable state"
+        assert "ui.callout(" not in src, f"{name} should no longer lead with a callout"
+
+
 def test_targets_are_marked_when_not_recorded():
     """D2/N5: the static target is shown under both definitions, marked pending,
     and the targets the repository does not record are named as missing."""
-    assert "definition pending advisor decision (D2)" in SRC
+    # the decision is named in plain words; its internal tag (D2) stays out of
+    # the reader's view (§24)
+    assert "definition pending advisor decision" in SRC
+    assert "advisor decision (D2)" not in SRC
     assert "not recorded in this repository" in SRC

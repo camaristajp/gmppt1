@@ -1,5 +1,127 @@
 # CHANGELOG — dashboard revision
 
+## Phase UX-2 — copy + information architecture (master revision prompt §24–§27)
+
+Method: a source sweep of every user-facing call (`callout`, `caption`, `legend_note`, `page_intro`, `unavailable`, `not_built`) for file names, module paths, script ids, schema keys, internal tags and app-mechanics words; then the rendered copy audit (widened with those patterns) over all 14 pages, excluding closed expanders; then every page rendered and read.
+
+### Developer-facing text removed from the normal UI
+
+| Where | Was | Now |
+|---|---|---|
+| Wrong-data-set guard | "Module split violation … resolves its modules through `dataset.module_split().val` — the same set `p7_tracker_comparison.py --split val` runs on" | "Wrong data set — … not validation data, so nothing is drawn" · machinery under Technical details |
+| Watch one run, Dynamic irradiance | "needs the trained model (`results/phase3/c3_two_stage.pkl`) and scikit-learn" (×2) | "The trained model could not be loaded" · path under Technical details |
+| Watch one run, A1 | "PSO evaluates 5 particles … (`gmppt/pso.py`) … particle k % 5 of iteration k // 5" | "every 5 dots are one iteration" · the loop arithmetic under Technical details |
+| Watch one run, A1 | "already computed and cached" | "already computed for this scenario" |
+| Compare methods | "Snapshot, not a live export" | "Snapshot, not the current result" |
+| Results vs targets | "Targets are not carried in any export" | "were never written down in this project" |
+| Shading relocation | "this export does not record the epsilon"; "Read from the export"; "uniform control (G5)"; "criteria p12 declared" | "the tolerance … was not recorded"; "What the numbers say"; "(G5)" and "p12" dropped |
+| Shading relocation | "The triggered variants was not recorded" (grammar) | "The trigger rate of the triggered variants was not recorded" |
+| Sources | engine "code" column: `gmppt.device + pvlib CEC parameters`, `app.py single-diode…` | a "model" column in words; module names under Technical details |
+| Sources | `app.py`'s validation record (lists `v_l4_breakdown_sensitivity.csv` etc.) in the page body | under "Validation record → Technical details" (app.py untouched) |
+| Set up a panel | "Explore and Testing use the validated research engine" · "benchmark figures under Testing" · a mono list `engine: single-diode + per-substring bypass (simplified) / reverse-bias avalanche: not modelled / …` | one plain sentence; the red card now says only what this engine cannot show |
+| Set up a panel | "800-point current grid · 256-point export"; "modules in `MODULE_PRESETS`" | plain sentences |
+| Dynamic irradiance | "needs a custom Streamlit component" | "a drag-and-drop control this dashboard does not have yet" |
+| Sandbox dataset | "Generate one on Simulator → Make a dataset"; page titled "The dataset" under a tab called "Sandbox dataset" | one name, "Sandbox dataset"; "Make a dataset" |
+| Benchmark set | near-tie file absent reported as a missing *field* ("shown as a dash") with no dash on the page | reported as not generated, which is what it is |
+| Exceptions (day run, dynamic trace) | `Could not run the day (<exception>)` in the callout | plain sentence; the exception under Technical details |
+
+### Duplicate explanations removed
+- Set up a panel said "not the validated engine / not a benchmark" three times (Sandbox banner, intro banner, red card). The banner says it once; the intro says the engines never mix; the card says what the engine cannot show.
+- Benchmark set's "Where it comes from →" and Sandbox dataset's "Where it comes from →" / "Make a dataset →" duplicated the footer navigation; Sources' "← The dataset" pointed a Results page back into the Sandbox. All four removed.
+
+### Typography (§23)
+`.gm-legend` (the note under every chart) was 0.72 rem developer mono. It is now body type at 0.82 rem. The provenance stamp and the animation budget line keep the mono face via `.gm-cite`, because those are citations.
+
+### Retained on purpose
+- `source: <file>.json · date · split=val · n=…` stamps under every figure (5 lines flagged by the audit): provenance the thesis needs.
+- Technical details expanders keep: split sizes, nearest training module, `module_split()` provenance, file names, schema keys, re-run commands, exception text.
+- The four failure states (not generated / could not be read / not in expected form / one field missing) stay distinct; only their visible sentences changed.
+
+### Protected-file observations (not changed)
+- `app.py` `render_dataset_section()` renders "🧪 Dataset" and then "🧪 Scenario Dataset Generator" (two headings for one thing) and "(CSV + NPZ + config)". Cosmetic; report only.
+- `app.py` `page_validation()` lists result files by name; now behind Technical details on Sources.
+
+
+## Phase UX-1 — workflow + visual architecture (master revision prompt §3–§23)
+
+### One workflow table
+
+| ID | What changed | Where | Verified |
+|----|--------------|-------|----------|
+| **§3** | `STAGES` is the single page→stage table. The header strip, the page eyebrow, the footer order, the Home stepper, the tutorial targets and the tests all derive from it. The old header sections ("Explore / Testing / The data") — a second vocabulary that produced `EXPLORE · INSIDE A PANEL` — are gone. | `STAGES`, `SANDBOX`, `JOURNEY`, `stage_of()` | `test_one_workflow_table_drives_everything`, `test_every_journey_page_eyebrow_names_its_stage` |
+| **§4** | Inside a panel renders **INSPECT · INSIDE A PANEL**; every journey page's eyebrow is `Stage · Page`. Verified in the rendered DOM, not from the variable. | 12 `page_intro` calls | shots.py (eyebrow + header stage on 11 pages) |
+| **§5** | The header's stage row **is** the workflow indicator: `UNDERSTAND → [INSPECT] → WATCH → COMPARE → EXPLORE → RESULTS │ SANDBOX`, mono, one line, current stage filled, others subdued, hover help per stage. The separate `.gm-flow` strip was a duplicate and is no longer rendered. Global controls moved to the second row so the strip never wraps around them; a media query keeps it on one line at 1100 px. | `ui.app_header(journey=, stage_help=)` | shots.py at 1440 and 1100 px |
+
+### Navigation and Home
+
+| ID | What changed | Where | Verified |
+|----|--------------|-------|----------|
+| **§13–14** | The five peer "Open →" cards are replaced by a **stepper**: one row per stage with done ✓ / current ● / next → / later ○, exactly one strong call to action (the next stage), quiet "open"/"revisit" links elsewhere, and no link at all on the current row. Visited stages are ticked from `gm_visited`. | `ui.stepper`, `_home_steps` | shots.py: one NEXT, one CTA, no "Open →" |
+| **§20** | `_home_cards` and the card constants deleted; the Sandbox is one quiet link under the stepper. | `page_home` | copy audit |
+
+### Interactive tutorial (§6–9)
+
+| ID | What changed | Where | Verified |
+|----|--------------|-------|----------|
+| **§6** | `ui.tutorial(steps)` is now a real onboarding overlay: a fixed full-screen dim with a **cut-out hole** over the real control (CSS `clip-path` even-odd, so it works whatever stacking context the target sits in — a box-shadow spotlight on the target itself only dimmed its own block), a focus ring, and a compact popup placed beside the target (right → below → above → left, clamped to the viewport, repositioned on scroll/resize). Back / Skip / Next / Finish are ordinary buttons. Nothing is drawn to stand in for a control; the control stays usable under the overlay. | `ui.tutorial`, `_tut_script`, `_TUT_CLEAR` | shots.py: target = real element, popup never overlaps it, Back/Next/Skip/Finish/reopen all pass |
+| **§7** | Seven steps on Home, each pointing at a real control: the Start button, then the six stepper rows. No navigation is forced. | `_tutorial_steps` | `test_tutorial_targets_real_controls_only` |
+| **§9** | `gm_tut_done` / `gm_tut_step` as before; reopening resets only the step. | — | shots.py |
+
+### Inside a panel (§15–19)
+
+Rebuilt as sections in order: orientation → **Operating point** (slider, then Current and Power as identical peer cards) → **Panel response** (P–V and I–V side by side, same height, the operating point drawn the same way on both) → **Substring state** (three identical cells, no dataframe) → **Why the curve has steps** (three sentences, technical rule behind an expander) → **Next** (one primary "Watch the trackers →" that sends this scenario) → **Look further** (A3, A4 as sections, not bordered cards). Peak label given headroom so it is never clipped.
+
+### Containers, balance, copy (§12, §20, §24)
+
+- Bordered cards removed from every animation section (Watch one run, Inside a panel, Dynamic irradiance, Saved scenarios); `ui.section_head` + dividers instead.
+- KPI rows: hero weight 1.6 → 1.25 so the verdict card is a peer; text values ("Across the strips") now set at word size so a phrase never makes one card twice the height of its neighbours (`.gm-kpi .v.text`).
+- The panels: Previous/Next no longer truncate; both small P–V charts keep the peak label inside the plot (including when the taller unshaded reference is shown).
+- Compare methods: scatter labels no longer overprint or clip; raw `arrival_separable_by_population =` moved under Technical details.
+- Dynamic irradiance: raw `reseed_credited =` moved under Technical details; Streamlit's default spinner (`Running _dynamic_day(...)`) replaced with plain sentences on all three cached runs.
+- Results: internal decision tag "(D2)" removed from the visible label. Relocation: "criteria p12 declared" → "acceptance criteria declared".
+- Watch one run and Set up a panel gained the title + eyebrow every other page had.
+
+### Glossary (§10)
+
+`ui.GLOSSARY` + `term_tip()`: KPI labels get hover help automatically for GMPP, true peak, V_oc, substring, bypass diode, control step, dynamic/tracking efficiency, Sandbox, Validation data, Exploratory, s.e., near-tie, Animation. Visible labels stand on their own; tooltips are 1–2 sentences, no Python names.
+
+
+## UI content cleanup + UX scaffolding (§5–§14)
+
+### §8 — the reported block (CRITICAL)
+
+| ID | What changed | Where | Verified | Residual risk |
+|----|--------------|-------|----------|---------------|
+| **§8** | The validation panel quoted in the report — split counts, "in training set / No", "closest module the model was trained on", the long "Validation module — not used to fit the model…" sentence and the model-file explanation — is **gone from the normal UI**. It was added in Phase C for U1.5 and read as a developer console. Replaced by one chip: **"Validation data — Used to compare tracking methods. Held-out test data is not shown."** | `_unseen_check`, `ui.data_chip` | uxtest §8 (9 phrases absent), phaseC (chip present, bookkeeping absent) | None. |
+| **§8 (2nd site)** | The same copy also ran on **Watch one run**, inside the example-scenario callout (`_VAL_WORDING` plus "nearest training module … z-scored parameter distance of 0.17"). That page now uses the same `_unseen_check` chip, so both sites say it once and say it identically. `_VAL_WORDING` deleted. | `page_run` | phaseC (demo names its data set the same way) | None. |
+| **§10 detail kept** | Nothing was deleted from the record. Split sizes (train 13,406 / validation 3,351 / test 4,189), the nearest training module and distance, and the note that membership resolves through `gmppt.dataset.module_split()` all moved into a collapsed **Technical details** expander. | `_unseen_check` | phaseC opens the expander and asserts all three facts | None — the check still runs; a training module still raises the **Wrong data set** limit callout. |
+
+### §11–§14 — labels, empty states, page copy
+
+| ID | What changed | Where | Verified |
+|----|--------------|-------|----------|
+| **§11** | 9 widget labels renamed out of implementation language — "Rows (strings)" → "Rows of panels", "Columns (per string)" → "Panels per row", "Shadow depth" → "How dark the shadow is", "Shadow width" → "How wide the shadow is", and so on. | `page_panels`, `page_sim_setup` | uxtest (no `(strings)` label survives) |
+| **§14** | `missing_export`, `missing_field` and `require_keys` rewritten onto `ui.unavailable`. The reader gets one sentence naming what is not there and stating that nothing was estimated; file names, absent schema keys and the script to re-run moved into Technical details. The **four failure modes stay distinguishable** — "has not been generated yet" ≠ "could not be read" ≠ "not in the form it expects" ≠ one absent figure. | `missing_export`, `missing_field`, `require_keys` | phaseA 27/27, including that each mode keeps its own wording and its own detail |
+| **§14 (gates)** | The relocation gate caveat led with `relocation_comparison_pole.json carries a single discarded total…`. It now leads with the finding — these results **cannot be described as gated** — in amber (`ui.unavailable(kind="limit")`), with the missing G1–G6 counts and the p12 re-run instruction underneath. | `page_relocation`, `ui.unavailable` | accept T9 (4 checks), `test_relocation_export_has_no_gate_counts` |
+| **§12** | The Watch-one-run method box named `gmppt/fallback.py` in body copy. The fact a reader needs — **neither variant has a backup scan; nothing rescues a wrong seed** — is now the visible sentence; the file and the N1/D3 reasoning moved into Technical details. | `page_run` | copy audit (no longer flagged) |
+
+**UI copy audit:** 42 → **6** flagged lines across all 14 pages. All six are intentional and stay: five `source: …json · date · split=val · n=…` provenance stamps (U7 requires every figure to name its export) and the Sources page naming the two engines, which is that page's subject.
+
+### §5–§7 — navigation and orientation
+
+| ID | What changed | Where | Verified |
+|----|--------------|-------|----------|
+| **§5** | Workflow indicator — `Understand → Inspect → Watch → Compare → Explore → Results` — above every journey page, with the current stage highlighted. Sandbox and the planned whole-system page carry **no** stage, because they are outside the benchmark journey. | `ui.flow_indicator`, `_FLOW_STAGE` | uxtest (6 pages highlight the right stage; Sandbox has none), `test_flow_stage_covers_the_journey_and_excludes_sandbox` |
+| **§6** | First-visit tutorial on Home: 6 steps, Continue / Skip, remembered in `gm_tut_done`, reopenable via "Show tutorial again". | `ui.tutorial` | uxtest (shows, advances, skips, closes, reopens), `test_tutorial_state_is_remembered` |
+| **§7** | `_PAGE_PURPOSE` gives each page a one-line statement of what it is for, used by the tutorial and the flow header. | `_PAGE_PURPOSE` | walk.py (all 15 pages render) |
+
+**Suite after this work:** pytest **57/57** · walk 15/15 pages · uxtest **35/35** · accept **22/22** · phaseA **27/27** · phaseB **22/22** · phaseC **24/24** · a1test **33/33** · t12 **28/28** · nb3 **10/10**.
+
+Three earlier failures were **stale tests**, not regressions — phaseA, phaseC and accept asserted the old copy verbatim. Each was rewritten to assert the new two-layer contract (plain sentence visible; the guaranteed fact still present once Technical details is opened), so the guarantee is still tested rather than dropped. nb3 failed only because it located a control by the label §11 renamed. A `cdp.tech()` helper was added to open expanders, since a closed `<details>` is absent from `innerText`.
+
+**One anomaly investigated and cleared:** t12 reported one click adding two events at 17:00. `dblprobe.py` drives a single click with no retry and gets exactly one event each time — the duplicate is t12's own documented click-retry landing twice after a slow rerun, not an app defect.
+
+
 ## Workflow audit + Update 3 (animation layer, first tranche)
 
 ### Defects found by the §2 audit
