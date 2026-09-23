@@ -4,7 +4,9 @@ numpy==2.4.4
 scipy==1.17.1
 pandas==3.0.2
 pvlib==0.15.2
-pyarrow==25.0.0
+# 25.0.0 is explicitly excluded by streamlit 1.63 (pyarrow!=25.0.0,<26); the
+# local environment has 25.0.1, which is what this pin now says.
+pyarrow==25.0.1
 matplotlib==3.11.1
 pytest==8.4.2
 # The dashboard is written against Streamlit 1.63 (st.navigation position=
