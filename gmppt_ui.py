@@ -1044,6 +1044,29 @@ _TUT_CLEAR = ("<script>(function(){const d=window.parent.document;"
               "if(e) e.remove();});})();</script>")
 
 
+def _script_frame(html_doc: str, name: str) -> None:
+    """Run a zero-height page script from a same-origin frame.
+
+    `st.components.v1.html` is deprecated in favour of `st.iframe`, which takes
+    a file rather than a string. The document is written under the system temp
+    directory and served from there; the file name carries a hash of the
+    content so a changed script is a new URL and the browser does not reuse a
+    cached one. Falls back to the old call if `st.iframe` refuses the file.
+    """
+    import hashlib, pathlib, tempfile
+    d = pathlib.Path(tempfile.gettempdir()) / "gmppt_ui_frames"
+    d.mkdir(parents=True, exist_ok=True)
+    h = hashlib.sha1(html_doc.encode("utf-8")).hexdigest()[:12]
+    p = d / f"{name}-{h}.html"
+    if not p.exists():
+        p.write_text(html_doc, encoding="utf-8")
+    try:
+        st.iframe(p, height=1)
+    except Exception:
+        import streamlit.components.v1 as components
+        components.html(html_doc, height=0)
+
+
 def tutorial(steps: Sequence[Mapping]) -> None:
     """Interactive onboarding: spotlight a REAL control, explain it, Next (§6–9).
 
@@ -1056,11 +1079,10 @@ def tutorial(steps: Sequence[Mapping]) -> None:
     State: `gm_tut_step` is the step, `gm_tut_done` remembers Skip or Finish.
     Reopening resets only the step, never anything else in the session.
     """
-    import streamlit.components.v1 as components
     steps = list(steps)
     if st.session_state.get("gm_tut_done") or not steps:
         if st.session_state.pop("gm_tut_clear", False):
-            components.html(_TUT_CLEAR, height=0)
+            _script_frame(_TUT_CLEAR, "clear")
         return
     i = int(st.session_state.get("gm_tut_step", 0))
     i = max(0, min(i, len(steps) - 1))
@@ -1090,8 +1112,8 @@ def tutorial(steps: Sequence[Mapping]) -> None:
                 st.session_state["gm_tut_step"] = i + 1
             st.rerun()
     import time as _t
-    components.html(_tut_script(str(step.get("target", "")), f"{i}-{_t.time():.0f}"),
-                    height=0)
+    _script_frame(_tut_script(str(step.get("target", "")), f"{i}-{_t.time():.0f}"),
+                  f"step{i}")
 
 
 def data_chip(label: str, note: str = "") -> None:

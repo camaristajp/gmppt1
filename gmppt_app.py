@@ -1233,8 +1233,13 @@ def page_panels():
             _unseen_check(name)
             rows = int(_dual("Rows of panels", "gm_rows", [1, 2, 3, 4, 6], "", 1, 1, 6, 3))
             per = int(_dual("Panels per row", "gm_per", [1, 2, 3, 4, 5, 6, 8], "", 1, 1, 8, 5))
-            mount = st.segmented_control("Mounting", ["Portrait", "Landscape"],
-                                         default="Portrait", key="gm_mount") or "Portrait"
+            # once the key is in session state (persist_widget_state keeps it
+            # alive across pages) a default would be a second source of truth,
+            # which Streamlit warns about on every run
+            mount = st.segmented_control(
+                "Mounting", ["Portrait", "Landscape"],
+                default=None if "gm_mount" in st.session_state else "Portrait",
+                key="gm_mount") or "Portrait"
             st.caption("Orientation decides what a shadow does: across the cell "
                        "strips, or along them.")
         n_panels = rows * per
@@ -1359,12 +1364,15 @@ def page_panels():
             f"<div class='bmono' style='font-size:12.5px;color:{c['text_muted']};"
             f"padding-bottom:10px'>Panel {_e(sel_id)} of {n_panels}</div>",
             unsafe_allow_html=True)
-        if st.button("Reset inspected panel", key="tool_clear",
-                     help="Go back to the first shaded panel. The shadow, the "
-                          "conditions and everything you have saved are left alone."):
-            st.session_state["gm_sel"] = default_id
-            st.toast(f"Inspecting {default_id} again — nothing else was reset.")
-            st.rerun()
+        # A widget's key may only be set from a callback (before the widget is
+        # instantiated), which is how Prev/Next already work. Setting it in the
+        # button's if-branch raised StreamlitWidgetAlreadyInstantiatedError.
+        def _reset_panel(d=default_id):
+            st.session_state["gm_sel"] = d
+            st.toast(f"Inspecting {d} again — nothing else was reset.")
+        st.button("Reset inspected panel", key="tool_clear", on_click=_reset_panel,
+                  help="Go back to the first shaded panel. The shadow, the "
+                       "conditions and everything you have saved are left alone.")
         st.markdown(_array_svg(rows, per, shaded_idx, sel_idx,
                                ui.EVENT_COLORS.get(obj, "#C2BFB6"), c, sel_id),
                     unsafe_allow_html=True)
@@ -3929,7 +3937,9 @@ def page_compare():
             "Found true peak (%)": None if r["found"] is None else round(r["found"], 1),
             "Worst case (W)": None if r["worst"] is None else round(r["worst"], 1),
             "Steps": ("—" if r["steps"] is None else int(r["steps"])),
-            "Readings": reads_for(key) if reads_for(key) is not None else "—",
+            # always a string: a column mixing ints and "—" cannot be serialised
+            # to Arrow and made Streamlit patch the frame on every render
+            "Readings": _fmt(reads_for(key), "{:.0f}"),
             "Energy captured (%)": None if r["energy"] is None else round(r["energy"], 2),
         } for label, key, r in rows])
         # No progress bars: a bar that starts at 78% turns a saturated metric into
