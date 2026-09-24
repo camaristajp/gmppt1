@@ -6,16 +6,19 @@
 toolbarMode = "minimal"
 showSidebarNavigation = false
 
+# Dark is the dashboard's default (gmppt_ui.DARK tokens); the header's Light
+# switch restyles the page through gmppt_ui.setup(), while widget accents stay
+# on these values because Streamlit reads them once, at start.
 [theme]
-base = "light"
-primaryColor = "#16616B"
-backgroundColor = "#F7F6F1"
-secondaryBackgroundColor = "#F0EDE4"
-textColor = "#15181B"
-borderColor = "#E3DFD4"
+base = "dark"
+primaryColor = "#2FA3AE"
+backgroundColor = "#0F1A22"
+secondaryBackgroundColor = "#223544"
+textColor = "#F2F4F5"
+borderColor = "#27404F"
 showWidgetBorder = true
 baseRadius = "0.6rem"
-linkColor = "#16616B"
+linkColor = "#2FA3AE"
 font = "IBM Plex Sans:https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&display=swap"
 headingFont = "Plus Jakarta Sans:https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@600;700;800&display=swap"
 codeFont = "IBM Plex Mono:https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&display=swap"

@@ -1,5 +1,40 @@
 # CHANGELOG — dashboard revision
 
+## Landing page — hero with a draggable before/after divider (2026-09-23)
+
+Scope: Home only. `page_home` is now drawn by the new `gmppt_hero.py`; `gmppt_app.py` keeps the tutorial's step targets, the "Show tutorial again" button and the session save/restore expander.
+
+### Structure (top to bottom)
+1. **Top bar, landing only** — mark + wordmark, EN/KO, Light/Dark. No section or page tabs: `_wrapped` calls `hero.top_bar()` for `home` and `ui.app_header(...)` for every other page.
+2. **Hero** — left column (max 480 px): amber eyebrow pill "AI Lab · Jeju National University × Nanum Energy", three-line heading with GMPPT teal / Bench amber, the lead, teal **Start exploring →** (The panels) and outline **▶ Watch a worked example** (Watch one run) as `st.page_link` in a wrapping row, and the restored fine print ("No account and no setup … 616 laboratory flash tests"). Right column: the figure card, then the restored `schematic` tag + "Illustrates the idea — not measured data."
+3. **Figure** — `st.iframe` (fallback `st.components.v1.html`): two full-box SVG layers (unshaded under, shaded over, `clip-path: inset(0 0 0 p%)`), a third unclipped layer carrying both chips, a 3 px divider with a round handle, and a transparent full-size `<input type=range>` (aria-label, aria-valuetext, arrow keys, focus ring on the handle). Opens at 50 % on every load. Box sized by `aspect-ratio: 620/360` with `max-width: 620px`; the frame gets an explicit height and then follows the card's real height from inside, so there is no dead space at narrow widths. Both curves come from `app.module_iv(datasheet_to_ref(MODULE_PRESETS[DEFAULT_PRESET]))`, unshaded 1000/1000/1000 and shaded 1000/**250**/600 W/m² — three distinct levels are what give three peaks (middle strip alone at 250 gives two; one band across all three gives one). Colours are passed in from `ui.T()`; dark mode has its own cell colours and divider colour.
+4. **What you can do here** — the five cards as before (Build the panel · Place the shadow · Read the curve · Run the trackers · Compare and export → Set up a panel, The panels, Inside a panel, Watch one run, Compare methods), keyed `gm-card-<page>` with `st.page_link` inside; the tutorial's seven steps now target the two hero links and these five cards.
+5. **Footer** — one line: simulation note · "Where the numbers come from →" · department.
+
+### The four defects
+1. Chips cut off at the card edge → both chips live on their own SVG layer anchored to the same 620×360 box as the artwork and are never clipped by the wipe or the card. 2. Divider parked at the right → `value="50"` plus `set(50)` on load. 3. Panel off-centre → x = (620 − 210) / 2. 4. Rotated axis label → dropped; the captions say "power against voltage".
+
+### EN/KO
+`gm_lang` (in `_PERSIST_KEYS`) selects `gmppt_hero.TEXT["EN"|"KO"]` for every string on the landing, including inside the figure. The rest of the dashboard, and the tutorial popup, stay English. The old smoke test that banned `gm_lang` as a dead control is replaced by one that checks it is read.
+
+### Verified
+- `pytest tests/test_app_smoke.py tests/test_hero.py`: 72 passed (`tests/test_hero.py` is new: peaks 1 / 3 from the engine, preset change moves both curves, document invariants, dark and Korean variants, no header tabs on Home only, copy present, old content gone).
+- Chrome DevTools, headless: 54/54 — no tabs on the landing; every string present; divider at 50 % on load and after reload; 620:360 kept; both chips inside the box and unwiped at 15 %; panel centred to 0.1 px; frame height = card height at 1440 / 1100 / 820 px; arrow keys move the range and the handle shows a focus ring; KO copy on the page and inside the figure; dark theme; Start exploring → `/panels` with the full Understand → Results strip; worked example → `/run`; card → `/simulator`; the tutorial still opens on first visit.
+
+### Moving background (landing only) and dark default
+- `gmppt_hero.backdrop()`: a fixed layer at `z-index: -1` under the page ground (the app's own grounds go transparent while Home is shown; html/body keep the page colour). Dark: a teal dawn glow that breathes, a faint 72 px cell lattice masked to the centre, teal and amber patches of light drifting left→right over 68–104 s, and a soft diagonal sweep every 46 s. Light: an amber sun, cloud shadows in the ink colour, the same lattice and sweep. Radial/linear gradients only, no blur filters; only `transform` and `opacity` animate. `prefers-reduced-motion` and the header's Animations-off switch park every shape at a composed position. Verified: present on Home only (The panels gets its ground back), animating, behind the hero frame and the cards, still under reduced motion and Animations off.
+- Dark is now the default for every page: `gm_theme` defaults to `"Dark"` and `.streamlit/config.toml` carries the DARK tokens (`base = "dark"`), so the first paint and the widget accents are dark. Light remains the header's switch.
+
+### Guided tour: opt-in only
+- It auto-started because `ui.tutorial()` (gmppt_ui.py, the `if st.session_state.get("gm_tut_done") … return` guard) drew the tour whenever `gm_tut_done` was unset — i.e. on every fresh session — and `_wrapped` (gmppt_app.py) calls it on every Home render. The guard is now `if not st.session_state.get("gm_tut_open")`: nothing draws unless `open_tutorial()` ran. No first-visit flag, no localStorage; `gm_tut_done` is gone.
+- One trigger: `ui.guide_button()` — a small "Guide me" in the landing top bar and in `ui.app_header` on every other page. On Home it opens the tour at step 1; elsewhere it goes to Home first (the steps point at Home's controls) and opens there. The "Show tutorial again" button on Home is removed.
+- Skip, Finish (the final Next) and a click outside the card all run `_close_tutorial()`: closed, step reset to 1, overlay cleared, nothing else touched. The dim now takes pointer events, so an outside click only closes (it never reaches a link underneath); the spotlight hole is a clip-path, so the highlighted control stays clickable; wheel events on the dim are forwarded to the page's scroll container so the page still scrolls while the tour is open.
+- Verified in Chrome (25/25): closed on load and after reload; Guide me on Home → step 1; Next → step 2; wheel scrolls; click on the dim closes without navigating; reopen → step 1; Skip → closed → reopen at step 1; seven Nexts → Finish on step 7 → closed, still on Home → reopen at step 1; Guide me on The panels → Home with the tour open at step 1. Tour content unchanged.
+
+### Known
+- Streamlit 1.63 logs that `st.components.v1.html` is deprecated ("will be removed after 2026-06-01") in favour of `st.iframe`; the figure uses `st.iframe` when present and falls back to `components.html`.
+- The header mark (`ui._LOGO` via `st.html`) does not render on any page, the landing included; pre-existing, not touched.
+
 ## Phase UX-2 — copy + information architecture (master revision prompt §24–§27)
 
 Method: a source sweep of every user-facing call (`callout`, `caption`, `legend_note`, `page_intro`, `unavailable`, `not_built`) for file names, module paths, script ids, schema keys, internal tags and app-mechanics words; then the rendered copy audit (widened with those patterns) over all 14 pages, excluding closed expanders; then every page rendered and read.

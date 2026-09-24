@@ -26,13 +26,15 @@ import plotly.graph_objects as go
 import streamlit as st
 
 import app as sim          # your existing simulator — physics, presets, pages
+import gmppt_hero as hero  # the landing page
 import gmppt_ui as ui
 from gmppt import config as _gcfg, dataset as _ds, device as _eng, scenarios as _scen
 from gmppt.hybrid import SEED_PROBE_COST
 
 st.set_page_config(page_title="GMPPT Bench", layout="wide", initial_sidebar_state="collapsed")
 sim.init_state()
-st.session_state.setdefault("gm_theme", "Light")
+st.session_state.setdefault("gm_theme", "Dark")   # dark is the default on every page; Light stays a switch
+st.session_state.setdefault("gm_lang", "EN")     # landing copy only; read in gmppt_hero
 st.session_state.setdefault("gm_anim", "On")     # §6 — global animation switch
 
 # Theme: the existing figures read sim.TH, so keep it in step with the new tokens.
@@ -50,87 +52,41 @@ def go_to(key: str) -> None:
 
 
 # --------------------------------------------------------------------------- #
-# Home  (landing — matches the design mockup exactly)
+# Home  (landing) — drawn by gmppt_hero. This file keeps only what the tutorial
+# and the tests need to see: the tour's step targets, which are the hero's two
+# links and the five cards, all real controls on the page.
 # --------------------------------------------------------------------------- #
-# Illustration and card icons extracted verbatim from the design mockup
-# (minified to a single line so Streamlit Markdown renders them as HTML, not code).
-_HERO_SVG = r'''<svg viewBox="0 0 620 360" style="width:100%;height:auto;display:block;" role="img" aria-label="The same panel side by side: unshaded with one smooth power peak, and shaded with three peaks of which only one is the true maximum"><rect x="6" y="6" width="298" height="348" rx="10" fill="#F7F6F1"></rect><rect x="316" y="6" width="298" height="348" rx="10" fill="#FBF4EC"></rect><text x="22" y="30" font-family="IBM Plex Mono, monospace" font-size="12" fill="#16616B">UNSHADED</text><text x="332" y="30" font-family="IBM Plex Mono, monospace" font-size="12" fill="#9A5314">SHADOW ACROSS THE STRIPS</text><rect x="70" y="44" width="170" height="84" fill="#DCE8E8" stroke="#A8C0C1"></rect><line x1="127" y1="44" x2="127" y2="128" stroke="#A8C0C1"></line><line x1="184" y1="44" x2="184" y2="128" stroke="#A8C0C1"></line><rect x="380" y="44" width="170" height="84" fill="#DCE8E8" stroke="#A8C0C1"></rect><line x1="437" y1="44" x2="437" y2="128" stroke="#A8C0C1"></line><line x1="494" y1="44" x2="494" y2="128" stroke="#A8C0C1"></line><rect x="380" y="102" width="170" height="26" fill="#B5641A" opacity="0.5"></rect><line x1="20" y1="298" x2="292" y2="298" stroke="#D6D2C7"></line><line x1="330" y1="298" x2="602" y2="298" stroke="#D6D2C7"></line><polyline points="20,298 50,272 80,246 110,222 140,200 165,186 185,180 205,181 225,192 245,214 265,250 285,298" fill="none" stroke="#16616B" stroke-width="2.5" stroke-linejoin="round"></polyline><circle cx="192" cy="180" r="6" fill="#B5641A"></circle><polyline points="330,298 349,273 369,250 388,234 403,228 415,235 425,249 437,231 452,207 466,189 478,182 491,186 503,200 515,218 527,210 539,202 553,196 563,206 576,233 588,266 600,298" fill="none" stroke="#16616B" stroke-width="2.5" stroke-linejoin="round"></polyline><circle cx="478" cy="182" r="6" fill="#B5641A"></circle><circle cx="403" cy="228" r="4" fill="none" stroke="#8A9098" stroke-width="1.5"></circle><circle cx="553" cy="196" r="4" fill="none" stroke="#8A9098" stroke-width="1.5"></circle><text x="22" y="322" font-family="IBM Plex Sans, sans-serif" font-size="13" fill="#2B3238">One peak. Any tracker finds it.</text><text x="332" y="322" font-family="IBM Plex Sans, sans-serif" font-size="13" fill="#2B3238">Three peaks. Only one is the real maximum.</text><text x="22" y="342" font-family="IBM Plex Mono, monospace" font-size="11" fill="#6A7177">power against voltage</text><text x="332" y="342" font-family="IBM Plex Mono, monospace" font-size="11" fill="#6A7177">the other two are traps</text><line x1="310" y1="6" x2="310" y2="354" stroke="#FFFFFF" stroke-width="3"></line></svg>'''
-_CARD_ICONS = [r'''<svg width="17" height="17" viewBox="0 0 18 18" aria-hidden="true"><rect x="2" y="2" width="14" height="14" rx="1.5" fill="none" stroke="#16616B" stroke-width="1.4"></rect><path d="M6.7 2v14M11.3 2v14" stroke="#16616B" stroke-width="1.4"></path></svg>''', r'''<svg width="17" height="17" viewBox="0 0 18 18" aria-hidden="true"><rect x="2" y="2" width="14" height="14" rx="1.5" fill="none" stroke="#16616B" stroke-width="1.4"></rect><path d="M2 11l7-7M5 15l10-10M10 16l6-6" stroke="#B5641A" stroke-width="1.3"></path></svg>''', r'''<svg width="17" height="17" viewBox="0 0 18 18" aria-hidden="true"><path d="M2 15c3 0 3-9 6.5-9S12 13 16 3" fill="none" stroke="#16616B" stroke-width="1.5" stroke-linecap="round"></path></svg>''', r'''<svg width="17" height="17" viewBox="0 0 18 18" aria-hidden="true"><path d="M4 3l8 6-8 6z" fill="none" stroke="#16616B" stroke-width="1.4" stroke-linejoin="round"></path></svg>''', r'''<svg width="17" height="17" viewBox="0 0 18 18" aria-hidden="true"><path d="M3 15V9M8 15V4M13 15v-4" stroke="#16616B" stroke-width="1.6" stroke-linecap="round"></path></svg>''']
-_CARD_TEXT = [
-    ("Build a scenario",
-     "Pick a validation module, choose a shading object and which panels it covers, "
-     "and set the sunlight and cell temperature."),
-    ("Read the curve",
-     "The power and current curves for that scenario, with every local peak and the "
-     "true maximum marked, and each bypass diode's state as you move the "
-     "operating point."),
-    ("Run the trackers",
-     "Send your scenario to the classic algorithms and to the model, and watch each "
-     "one search the same curve step by step."),
-    ("Compare methods",
-     "Every method on the same validation scenarios: arrival rate, worst case, "
-     "steps, and what the accuracy costs in readings."),
-    ("Results vs targets",
-     "The funded targets beside what was measured, with the caveats that belong to "
-     "each number."),
-]
-# The page each card opens, in the order of _CARD_TEXT — the real journey:
-# build a scenario, look inside it, run the trackers, compare, read the verdict.
-_CARD_LINKS = ["panels", "inside", "run", "compare", "results"]
-
-_SANDBOX_CARD_ICONS = [_CARD_ICONS[0]]
-_SANDBOX_CARD_TEXT = [
-    ("Sandbox — set up a panel",
-     "Type a datasheet in yourself and watch the curve. A separate, simplified "
-     "engine: exploratory only, never a benchmark result."),
-]
-_SANDBOX_CARD_LINKS = ["sim_setup"]
-
-
-def _home_steps():
-    """The journey as stepper rows — one per stage, landing on its first page.
-
-    Every link goes through st.page_link, never a raw href: a full browser
-    navigation would start a new session and drop the scenario. (R1)
-    """
-    rows = []
-    for stage, keys in STAGES:
-        k = keys[0]
-        rows.append((k, P.get(k), stage, _PAGE_PURPOSE.get(k, "")))
-    return rows
-
-
 def _tutorial_steps():
     """The onboarding tour (§6–7): each step points at a REAL control on Home.
 
-    The targets are the hero's primary action and the stepper rows, which are
-    the same links the reader will use once the tour is over. No stand-ins.
+    The targets are the hero's primary and secondary links and the five cards,
+    which are the same links the reader will use once the tour is over.
     """
-    first = STAGES[0][1][0]
-    row = lambda k: f".st-key-gm-step-{k}"
+    card = lambda k: f".st-key-gm-card-{k}"
     return [
         {"target": ".st-key-hero-primary a", "title": "Start here",
-         "body": "Build the validation scenario you want to inspect. This button "
-                 "takes you to the first step."},
-        {"target": row("panels"), "title": "Choose your scenario",
-         "body": "Select the validation module, the shading object, the sunlight "
-                 "and the cell temperature. The power curve redraws as you go."},
-        {"target": row("inside"), "title": "Inspect the panel",
-         "body": "Move the operating point and see how the curve and each "
-                 "bypass diode respond."},
-        {"target": row("run"), "title": "Watch the search",
+         "body": "This button takes you to The panels, the first step of the "
+                 "journey. Everything else on this page is a shortcut into it."},
+        {"target": card("sim_setup"), "title": "Build the panel",
+         "body": "Pick a module and set the sunlight and the cell temperature, "
+                 "starting from a clean unshaded curve."},
+        {"target": card("panels"), "title": "Place the shadow",
+         "body": "Drag a shadow along or across the cell strips and watch the "
+                 "power curve grow extra peaks."},
+        {"target": card("inside"), "title": "Read the curve",
+         "body": "Every peak and the true maximum are marked, with each bypass "
+                 "diode's state as you move the operating point."},
+        {"target": card("run"), "title": "Run the trackers",
          "body": "Send the scenario to the tracking methods and watch how each "
                  "one searches the same curve."},
-        {"target": row("compare"), "title": "Compare methods",
-         "body": "Compare the tracking methods on the same validation "
-                 "scenarios — every method, every shaded case."},
-        {"target": row("moving"), "title": "Explore changing conditions",
-         "body": "Dynamic irradiance and shading relocation show how changing "
-                 "conditions affect tracking."},
-        {"target": row("results"), "title": "Review the results",
-         "body": "Read the measured results beside the documented targets, and "
-                 "see where every number came from."},
-    ] if first == "panels" else []
+        {"target": card("compare"), "title": "Compare and export",
+         "body": "See what each method captured and how long it took, and take "
+                 "the tables and figures away as files."},
+        {"target": ".st-key-hero-secondary a", "title": "Or watch first",
+         "body": "Prefer to see it before you touch anything? This opens a "
+                 "worked example with a shadow already in place."},
+    ]
+
 
 
 def _session_io():
@@ -185,154 +141,12 @@ def _session_blob() -> str:
     }, indent=2, default=str)
 
 
-def _home_css(c):
-    st.markdown(
-        ("<style>"
-         ".st-key-hero-primary a{height:52px;padding:0 26px;background:%(teal)s;"
-         "color:#fff!important;border:1px solid %(teal)s;border-radius:10px;font-size:15px;"
-         "font-weight:600;display:flex;align-items:center;justify-content:center;gap:10px;"
-         "text-decoration:none;}"
-         ".st-key-hero-primary a:hover{background:%(teal_dark)s;border-color:%(teal_dark)s;}"
-         ".st-key-hero-primary a p{color:#fff!important;margin:0;font-weight:600;}"
-         ".st-key-hero-secondary a{height:52px;padding:0 22px;background:%(surface)s;"
-         "color:%(text)s!important;border:1px solid %(border_strong)s;border-radius:10px;"
-         "font-size:15px;font-weight:500;display:flex;align-items:center;justify-content:center;"
-         "gap:10px;text-decoration:none;}"
-         ".st-key-hero-secondary a p{color:%(text)s!important;margin:0;}"
-         ".st-key-hero-primary a>svg,.st-key-hero-secondary a>svg{display:none;}"
-         # ---- A8 --------------------------------------------------------- #
-         # The hero curves draw themselves once, from the polyline coordinates
-         # already in the mockup's SVG. Nothing is computed and no number is
-         # introduced: this is the stroke being revealed along its own path.
-         # The animation runs only under .on (Animations: On) and is disabled
-         # outright under prefers-reduced-motion, where the finished drawing is
-         # what a reader sees.
-         "@keyframes gm-draw{to{stroke-dashoffset:0;}}"
-         "@keyframes gm-pop{from{opacity:0;transform:scale(.4);}"
-         "to{opacity:1;transform:scale(1);}}"
-         ".gm-hero.on polyline{stroke-dasharray:900;stroke-dashoffset:900;"
-         "animation:gm-draw 1.7s cubic-bezier(.22,.61,.36,1) forwards;}"
-         ".gm-hero.on polyline:nth-of-type(2){animation-delay:.45s;}"
-         ".gm-hero.on circle{opacity:0;transform-box:fill-box;"
-         "transform-origin:center;animation:gm-pop .45s ease-out 1.9s forwards;}"
-         "@media (prefers-reduced-motion: reduce){"
-         ".gm-hero.on polyline{stroke-dasharray:none;stroke-dashoffset:0;"
-         "animation:none;}"
-         ".gm-hero.on circle{opacity:1;animation:none;transform:none;}}"
-         "div[class*=\"st-key-gmcards\"]{margin-top:18px;}"
-         # The card body is HTML; the action is a real st.page_link so it cannot
-         # reload the session. The keyed container is the card, and its last child
-         # (the link) is pushed to the bottom so the rows line up.
-         "div[class*=\"st-key-gmcards\"] div[data-testid=\"stColumn\"]{display:flex;"
-         "flex-direction:column;}"
-         "div[class*=\"st-key-gmcards\"] div[data-testid=\"stColumn\"]>div{width:100%%;"
-         "height:100%%;}"
-         "div[class*=\"-card-\"]{box-sizing:border-box;display:flex;flex-direction:column;"
-         "height:100%%;min-height:212px;gap:0!important;background:%(surface)s;"
-         "border:1px solid %(border)s;border-radius:14px;padding:18px;"
-         "transition:border-color .12s ease,box-shadow .12s ease;}"
-         "div[class*=\"-card-\"]>div{flex:0 0 auto;width:100%%;min-height:0;}"
-         "div[class*=\"-card-\"]:hover{border-color:%(border_strong)s;"
-         "box-shadow:0 2px 12px rgba(16,24,32,.07);}"
-         ".gm-ico{width:34px;height:34px;display:flex;align-items:center;"
-         "justify-content:center;border:1px solid %(border)s;border-radius:9px;}"
-         ".gm-title{margin-top:12px;font-size:15px;font-weight:600;color:%(text)s;}"
-         ".gm-desc{margin:6px 0 0 0;font-size:13px;line-height:1.5;color:%(text_body)s;}"
-         "div[class*=\"-go-\"]{margin-top:auto!important;padding-top:16px;}"
-         "div[class*=\"-go-\"] a{display:inline-flex;align-items:center;"
-         "justify-content:center;height:36px;padding:0 16px;border-radius:8px;"
-         "background:%(teal)s;color:#fff!important;font-weight:600;font-size:13px;"
-         "text-decoration:none;}"
-         "div[class*=\"-go-\"] a:hover{background:%(teal_dark)s;}"
-         "div[class*=\"-go-\"] a p{margin:0;color:#fff!important;font-weight:600;}"
-         "div[class*=\"-go-\"] a>svg{display:none;}"
-         ".st-key-home-sources a{color:%(teal)s!important;font-weight:600;"
-         "text-decoration:none;}"
-         ".st-key-home-sources a p{margin:0;font-weight:600;}"
-         "</style>") % {"teal": c["teal"], "teal_dark": c["teal_dark"],
-                        "surface": c["surface"], "text": c["text"],
-                        "text_body": c["text_body"],
-                        "border": c["border"], "border_strong": c["border_strong"]},
-        unsafe_allow_html=True)
-
-
 def page_home():
-    c = ui.T()
-    disp, mono = ui.FONTS["display"], ui.FONTS["mono"]
-    _home_css(c)
-
-    left, right = st.columns([0.46, 0.54], gap="large", vertical_alignment="center")
-    with left:
-        st.markdown(
-            f'<span style="display:inline-flex;align-items:center;gap:8px;padding:7px 14px;'
-            f'border:1px solid {c["amber_border"]};border-radius:999px;background:{c["amber_tint"]};'
-            f'font-family:{mono};font-size:11px;letter-spacing:.07em;text-transform:uppercase;'
-            f'color:{c["amber_text"]};"><svg width="10" height="10" viewBox="0 0 10 10">'
-            f'<circle cx="5" cy="5" r="4" fill="{c["amber"]}"></circle></svg>'
-            f'AI Lab \u00b7 Jeju National University \u00d7 Nanum Energy</span>'
-            f'<h1 style="margin:16px 0 0 0;font-family:{disp};font-size:54px;font-weight:800;'
-            f'line-height:1.04;letter-spacing:-.035em;color:{c["text"]};">Welcome to the<br>'
-            f'<span style="color:{c["teal"]};">GMPPT</span> '
-            f'<span style="color:{c["amber"]};">Bench</span><br>Dashboard</h1>'
-            f'<p style="margin:16px 0 0 0;font-size:17px;line-height:1.55;color:{c["text_body"]};'
-            f'max-width:520px;">Put a shadow anywhere on a solar panel, watch the power curve '
-            f'change shape, and see which tracking algorithm still finds the true peak.</p>',
-            unsafe_allow_html=True)
-        b1, b2 = st.columns([1, 1.25])
-        with b1:
-            with st.container(key="hero-primary"):
-                st.page_link(P["panels"], label="Start exploring  \u2192")
-        with b2:
-            with st.container(key="hero-secondary"):
-                st.page_link(P["run"], label="\u25b6  Watch a worked example")
-        st.markdown(
-            f'<p style="margin:14px 0 0 0;font-size:13px;line-height:1.5;color:{c["text_muted"]};'
-            f'max-width:520px;">No account and no setup. Every panel here is simulated on a model '
-            f'matched to within about one per cent of 616 laboratory flash tests.</p>',
-            unsafe_allow_html=True)
-    with right:
-        # A8: the illustration draws itself. CSS only, on the coordinates the
-        # mockup already carries — no numbers are introduced for the hero.
-        cls = "gm-hero on" if ui.anim_on() else "gm-hero"
-        st.markdown(
-            f'<div class="{cls}" style="background:{c["surface"]};'
-            f'border:1px solid {c["border"]};'
-            f'border-radius:16px;padding:18px 20px 12px 20px;">{_HERO_SVG}'
-            f'<p style="margin:6px 0 0 0;text-align:center;font-size:12.5px;color:{c["text_muted"]};">'
-            f'The same panel on the same afternoon — compared with and without partial shading.'
-            f'</p></div>', unsafe_allow_html=True)
-        ui.anim_badge("schematic", "the illustration from the design mockup")
-
-    # The journey, as a stepper rather than five peer cards: one strong "start
-    # here", the rest quiet, and the stages already visited ticked (§13–14).
-    st.space(size="medium")
-    ui.section_head("The workflow", "six stages, in order — start at the top")
-    ui.stepper(_home_steps(), current=None,
-               done=st.session_state.get("gm_visited", []))
-
-    st.space(size="small")
-    with st.container(key="gm-sandbox-link"):
-        st.page_link(P["sim_setup"], label="Sandbox — a separate, simplified engine "
-                                           "for trying your own datasheet →",
-                     help=ui.GLOSSARY["Sandbox"])
-
-    if st.session_state.get("gm_tut_done"):
-        if st.button("Show tutorial again", key="gm_tut_reopen",
-                     help="Reopen the six-step walkthrough."):
-            st.session_state["gm_tut_done"] = False
-            st.session_state["gm_tut_step"] = 0
-            st.rerun()
-
+    hero.render_hero(P)
+    hero.render_cards(P)
     _session_io()
+    hero.render_footer(P)
 
-    st.markdown(
-        f'<div style="margin-top:28px;display:flex;align-items:center;gap:16px;padding-top:18px;'
-        f'border-top:1px solid {c["border"]};font-size:12.5px;color:{c["text_muted"]};">'
-        f'<span>Simulated modules only \u2014 no field measurements behind these figures yet.</span>'
-        f'<span style="margin-left:auto;font-family:{mono};">Dept. of Computer Engineering, '
-        f'Jeju National University</span></div>', unsafe_allow_html=True)
-    with st.container(key="home-sources"):
-        st.page_link(P["sources"], label="Where the numbers come from \u2192")
 
 
 # =========================================================================== #
@@ -5218,7 +5032,7 @@ _PERSIST_KEYS = [
     "gm_showuns", "gm_pv", "gm_vop", "gm_rows", "gm_per", "gm_mount",
     "gm_depth2", "gm_width", "gm_G2", "gm_T2",
     "run_overlay", "mv_scen", "mv_show", "mv_mode", "saved_pick", "day_time",
-    "gm_anim", "a1_steps", "a1_view", "a1_built", "a2_built", "a3_built",
+    "gm_anim", "gm_lang", "a1_steps", "a1_view", "a1_built", "a2_built", "a3_built",
     "a4_built", "a5_built", "a6_built", "a7_built", "a9_built",
     "bench_preset", "bench_nsub", "bench_mstr", "bench_pstr", "bench_obj",
     "bench_baseG", "bench_T", "bench_scen_name",
@@ -5246,9 +5060,14 @@ def _make_page(key):
 
     def _wrapped():
         # The header's stage strip is the one persistent "where am I" (§5); it is
-        # drawn from STAGES, with the stage's purpose as hover help (§7).
-        ui.app_header({k: P.get(k) if _PAGE_FUNCS[k][0] else None for k in _PAGE_FUNCS},
-                      SECTION_KEYS, key, journey=JOURNEY, stage_help=_STAGE_PURPOSE)
+        # drawn from STAGES, with the stage's purpose as hover help (§7). The
+        # landing is the one page without it: no section or page tabs until the
+        # reader starts exploring — just the mark, EN/KO and Light/Dark.
+        if key == "home":
+            hero.top_bar()
+        else:
+            ui.app_header({k: P.get(k) if _PAGE_FUNCS[k][0] else None for k in _PAGE_FUNCS},
+                          SECTION_KEYS, key, journey=JOURNEY, stage_help=_STAGE_PURPOSE)
         # A deploy that is missing the module pool cannot draw a single panel.
         # Say so in a sentence, with the file list one click away, rather than
         # dying in pd.read_parquet with a redacted traceback (Streamlit Cloud

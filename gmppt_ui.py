@@ -252,8 +252,15 @@ def _inject_css(c: dict) -> None:
     .st-key-gm-stepcta a:hover {{ background: {c['teal_dark']} !important; }}
 
     /* ---------- interactive tutorial: spotlight + adjacent popup (§6–8) ---------- */
-    #gm-tut-dim {{ position: fixed; inset: 0; z-index: 9998; pointer-events: none;
+    #gm-tut-dim {{ position: fixed; inset: 0; z-index: 9998; cursor: default;
         background: rgba(15, 20, 25, 0.5); }}
+    /* ---------- Guide me: the one trigger, in every header ---------- */
+    .st-key-gm-guide button {{ min-height: 32px !important; padding: 0 12px !important;
+        font-size: 0.82rem !important; border-radius: {RADIUS['pill']} !important;
+        background: {c['surface']} !important; border: 1px solid {c['border_strong']} !important;
+        color: {c['text_body']} !important; white-space: nowrap; }}
+    .st-key-gm-guide button:hover {{ border-color: {c['teal']} !important; color: {c['teal']} !important; }}
+    .st-key-gm-guide button:focus-visible {{ outline: 2px solid {c['amber']}; outline-offset: 2px; }}
     #gm-tut-ring {{ position: fixed; z-index: 9999; pointer-events: none; display: none;
         border: 3px solid {c['teal']}; border-radius: 10px;
         box-shadow: 0 0 0 4px rgba(255, 255, 255, 0.35); }}
@@ -747,6 +754,7 @@ def app_header(pages: dict, sections: dict, current: str, routes: dict | None = 
                     with st.container(key=f"gm-tab-{k}", width="content"):
                         st.page_link(page, label=title)
             st.space("stretch")
+            guide_button(pages.get("home"), current)
             # Animations On/Off (§30). Off is a real setting, not a hint: pages
             # build no Plotly frames at all and fall back to snapshot strips.
             st.segmented_control(
@@ -1006,6 +1014,18 @@ def _tut_script(selector: str, nonce: str) -> str:
         "doc.querySelectorAll('.gm-tut-target').forEach(e=>e.classList.remove('gm-tut-target'));"
         "let dim=doc.getElementById('gm-tut-dim');"
         "if(!dim){dim=doc.createElement('div');dim.id='gm-tut-dim';doc.body.appendChild(dim);}"
+        # A click on the dim — anywhere outside the card and outside the hole cut
+        # for the target — closes the tour through its own Skip button, so the
+        # close goes through the same state change as pressing Skip. The hole is
+        # a clip-path, and clipped-out regions take no pointer events, so the
+        # real control underneath stays clickable.
+        "dim.onclick=function(){const s=doc.querySelector('.st-key-gm-tut-pop .st-key-gm_tut_skip button')"
+        "||Array.from(doc.querySelectorAll('.st-key-gm-tut-pop button')).find(b=>b.innerText.trim()==='Skip');"
+        "if(s) s.click();};"
+        # the dim sits over the page, so pass the wheel through to the page's
+        # own scroll container — the tour must not freeze scrolling
+        "dim.onwheel=function(e){const m=doc.querySelector('section.stMain')||doc.scrollingElement;"
+        "if(m){m.scrollTop+=e.deltaY;m.scrollLeft+=e.deltaX;e.preventDefault();}};"
         "let ring=doc.getElementById('gm-tut-ring');"
         "if(!ring){ring=doc.createElement('div');ring.id='gm-tut-ring';doc.body.appendChild(ring);}"
         f"const t=doc.querySelector('{sel}');"
@@ -1067,6 +1087,36 @@ def _script_frame(html_doc: str, name: str) -> None:
         components.html(html_doc, height=0)
 
 
+def open_tutorial() -> None:
+    """Open the tour at step 1. The only way it ever opens."""
+    st.session_state["gm_tut_open"] = True
+    st.session_state["gm_tut_step"] = 0
+
+
+def _close_tutorial() -> None:
+    """Skip, the final Next and a click outside the card all end here: closed,
+    and back at step 1 for next time. Nothing else in the session is touched."""
+    st.session_state["gm_tut_open"] = False
+    st.session_state["gm_tut_step"] = 0
+    st.session_state["gm_tut_clear"] = True
+
+
+def guide_button(home_page=None, current: str = "home") -> None:
+    """The one trigger: a small "Guide me" button, drawn in every header.
+
+    The tour's steps point at controls on Home, so pressing it elsewhere goes
+    to Home first (`home_page`) and opens the tour there. Pressing it on Home
+    just opens the tour.
+    """
+    with st.container(key="gm-guide", width="content"):
+        # no help= here: Streamlit draws a "?" icon inside any button that has one
+        if st.button("Guide me", key="gm_tut_open_btn"):
+            open_tutorial()
+            if current != "home" and home_page is not None:
+                st.switch_page(home_page)
+            st.rerun()
+
+
 def tutorial(steps: Sequence[Mapping]) -> None:
     """Interactive onboarding: spotlight a REAL control, explain it, Next (§6–9).
 
@@ -1076,11 +1126,12 @@ def tutorial(steps: Sequence[Mapping]) -> None:
     placed beside the target by _tut_script; Back / Next / Skip / Finish are
     ordinary buttons, so the keyboard reaches them.
 
-    State: `gm_tut_step` is the step, `gm_tut_done` remembers Skip or Finish.
-    Reopening resets only the step, never anything else in the session.
+    Closed by default. It is drawn only while `gm_tut_open` is True, which
+    only guide_button() / open_tutorial() set — never on page load, never
+    from a first-visit check. `gm_tut_step` is the step; closing resets it.
     """
     steps = list(steps)
-    if st.session_state.get("gm_tut_done") or not steps:
+    if not st.session_state.get("gm_tut_open") or not steps:
         if st.session_state.pop("gm_tut_clear", False):
             _script_frame(_TUT_CLEAR, "clear")
         return
@@ -1099,15 +1150,13 @@ def tutorial(steps: Sequence[Mapping]) -> None:
             st.session_state["gm_tut_step"] = i - 1
             st.rerun()
         if b.button("Skip", key="gm_tut_skip", use_container_width=True,
-                    help="Close the tour. Reopen it any time from Home."):
-            st.session_state["gm_tut_done"] = True
-            st.session_state["gm_tut_clear"] = True
+                    help="Close the tour. Reopen it any time with Guide me."):
+            _close_tutorial()
             st.rerun()
         if d.button("Finish" if last else "Next →", key="gm_tut_next",
                     type="primary", use_container_width=True):
             if last:
-                st.session_state["gm_tut_done"] = True
-                st.session_state["gm_tut_clear"] = True
+                _close_tutorial()
             else:
                 st.session_state["gm_tut_step"] = i + 1
             st.rerun()

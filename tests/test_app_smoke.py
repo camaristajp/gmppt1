@@ -40,7 +40,6 @@ SRC = APP.read_text(encoding="utf-8")
     (r"_RUN_COLORS", "colours come from ui.METHOD_COLORS (§7.2)"),
     (r"_MV_COLORS", "colours come from ui.METHOD_COLORS (§7.2)"),
     (r"_RUN_READINGS", "readings come from READINGS/SEED_PROBE_COST (R11)"),
-    (r"gm_lang", "the language toggle is read nowhere and was removed"),
     (r"ui\.next_step\(", "footer_nav replaces next_step (§5)"),
     (r'"6 readings"', "the probe count is SEED_PROBE_COST, not a literal (N2)"),
     (r"/ 6\.0", "the probe count is SEED_PROBE_COST, not a literal (N2)"),
@@ -885,25 +884,46 @@ def test_every_journey_page_eyebrow_names_its_stage():
 
 
 def test_tutorial_targets_real_controls_only():
-    """§6: every step points at an element the page really draws."""
-    h = _load_helpers({"_tutorial_steps"}, {"STAGES"})
-    h["P"] = {}
-    h["_PAGE_PURPOSE"] = {}
+    """§6: every step points at an element the page really draws — the hero's
+    two links and the five cards gmppt_hero renders (keyed gm-card-<page>)."""
+    import gmppt_hero as hero
+    h = _load_helpers({"_tutorial_steps"})
     steps = h["_tutorial_steps"]()
     assert len(steps) == 7, "seven steps (§7)"
+    cards = {f".st-key-gm-card-{k}" for k in hero.CARD_LINKS}
     for s in steps:
-        assert s["target"].startswith(".st-key-"), s
-        key = s["target"].replace(".st-key-", "")
-        assert (key == "hero-primary a" or key.startswith("gm-step-")), s
-    # the stepper rows the tour points at must be stages of the journey
-    stage_pages = {ks[0] for _, ks in _stages()[0]}
-    for s in steps[1:]:
-        assert s["target"].replace(".st-key-gm-step-", "") in stage_pages, s
+        assert s["target"] in ({".st-key-hero-primary a", ".st-key-hero-secondary a"} | cards), s
+    assert {s["target"] for s in steps} >= cards, "every card is a step"
+
+
+def test_language_switch_is_read_where_it_is_offered():
+    """The EN/KO switch lives in the landing's top bar and drives the landing's
+    copy — it must not be a dead control."""
+    import gmppt_hero as hero
+    src = (ROOT / "gmppt_hero.py").read_text(encoding="utf-8")
+    assert 'key="gm_lang"' in src and 'st.session_state.get("gm_lang")' in src
+    assert set(hero.TEXT) == {"EN", "KO"}
+    assert set(hero.TEXT["EN"]) == set(hero.TEXT["KO"]), "both languages carry the same keys"
+    assert len(hero.TEXT["EN"]["cards"]) == len(hero.TEXT["KO"]["cards"]) == len(hero.CARD_LINKS) == 5
+    assert '"gm_lang"' in SRC.split("_PERSIST_KEYS")[1][:900], \
+        "gm_lang must survive leaving the landing (R2)"
 
 
 def test_tutorial_state_is_remembered():
-    assert "gm_tut_done" in SRC and "gm_tut_step" in SRC
-    assert "Show tutorial again" in SRC, "the tutorial must be reopenable (§6)"
+    """Closed by default; opened only by the Guide me button in every header;
+    Skip, Finish and a click outside close it and reset the step."""
+    assert "gm_tut_open" in UI_SRC and "gm_tut_step" in UI_SRC
+    assert "gm_tut_done" not in UI_SRC and "gm_tut_done" not in SRC, "no first-visit flag"
+    assert "localStorage" not in UI_SRC and "localStorage" not in SRC
+    assert "Show tutorial again" not in SRC, "one trigger only: Guide me"
+    tut = UI_SRC.split("def tutorial(")[1].split("\ndef ")[0]
+    assert 'if not st.session_state.get("gm_tut_open")' in tut, "never draws unless opened"
+    assert "guide_button(pages.get(\"home\"), current)" in UI_SRC, "Guide me in app_header"
+    assert 'ui.guide_button(None, "home")' in (ROOT / "gmppt_hero.py").read_text(encoding="utf-8"), \
+        "Guide me in the landing top bar"
+    close = UI_SRC.split("def _close_tutorial(")[1].split("\ndef ")[0]
+    assert '["gm_tut_open"] = False' in close and '["gm_tut_step"] = 0' in close
+    assert "dim.onclick" in UI_SRC, "click outside closes"
 
 
 def test_missing_data_states_lead_with_plain_language():
