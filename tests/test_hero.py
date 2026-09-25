@@ -143,7 +143,8 @@ def test_backdrop_is_landing_only_and_respects_motion_settings():
 
 
 def test_dark_is_the_default_everywhere():
-    assert 'st.session_state.setdefault("gm_theme", "Dark")' in APP_SRC
+    # Dark is the default preference; an existing choice is never rewritten
+    assert 'st.session_state.get("gm_theme_pref", "Dark")' in APP_SRC
     cfg = (ROOT / ".streamlit" / "config.toml").read_text(encoding="utf-8")
     assert 'base = "dark"' in cfg
     assert ui.DARK["bg"] in cfg and ui.DARK["teal"] in cfg

@@ -152,12 +152,27 @@ def method_style(label: str) -> dict:
     return {"color": METHOD_COLORS.get(base, METHOD_COLORS["InC"]),
             "dash": VARIANT_DASH.get(variant, "solid")}
 
-_theme_name = "light"
+_theme_name = "light"        # process-wide fallback only (tests, bare mode); see T()
+
+
+def _session_theme_name():
+    """The theme resolved for THIS session's current run, or None outside one.
+
+    The module global above is shared by every session and thread in the
+    Streamlit process, so two sessions on different themes would race and a run
+    could inject dark CSS at setup() yet read the light palette from T() later.
+    The per-session value in session_state cannot be changed by another
+    session; it is written once per run by setup() from the user's choice."""
+    try:
+        return st.session_state.get("_gm_theme_name")
+    except Exception:
+        return None
 
 
 def T() -> dict:
-    """The active palette."""
-    return DARK if _theme_name == "dark" else LIGHT
+    """The active palette, from this session's theme."""
+    name = _session_theme_name() or _theme_name
+    return DARK if name == "dark" else LIGHT
 
 
 # --------------------------------------------------------------------------- #
@@ -167,6 +182,10 @@ def setup(theme: str = "light") -> None:
     """Call once at the top of the entry script, after st.set_page_config."""
     global _theme_name, _ROW_IDS
     _theme_name = "dark" if str(theme).lower().startswith("d") else "light"
+    try:
+        st.session_state["_gm_theme_name"] = _theme_name   # this session's, for T()
+    except Exception:
+        pass                                               # bare mode: the global serves
     _ROW_IDS = itertools.count()          # sibling_row keys restart every run
     _inject_css(T())
     _register_plotly(T())

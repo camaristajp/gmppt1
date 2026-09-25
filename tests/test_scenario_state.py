@@ -250,8 +250,80 @@ def test_T13_engine_failure_is_an_explicit_stop():
     head = body.split("_topo_click_to_selection()")[0]
     assert 'ui.unavailable("The validated engine is not connected"' in head
     assert 'kind="limit"' in head and "return" in head
-    for hidden in ("_run_demo(", "_demo_module()[0]", "sim.module_iv", "MODULE_PRESETS"):
+    assert "_demo_module" not in head, "no module stands in when the engine is missing"
+    for hidden in ("_run_demo(", "sim.module_iv", "MODULE_PRESETS"):
         assert hidden not in body, f"{hidden} must not stand in for the engine"
+    # the demo module appears once, as the selector's explicit, documented default
+    assert body.count("_demo_module()[0]") == 1 and "default_label" in body
+
+
+# --------------------------------------------------------------------------- #
+# Panel type: the research validation set, one source, no fallback
+# --------------------------------------------------------------------------- #
+def _validation_modules_from_source():
+    """Run gmppt_app._validation_modules with its real inputs, no Streamlit."""
+    import pandas as pd
+    from gmppt import config as gcfg, dataset as ds
+    tree = ast.parse(APP_SRC)
+    fn = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "_validation_modules")
+    fn.decorator_list = []
+    pool = pd.read_parquet(gcfg.CEC_POOL)
+    val = frozenset(str(m) for m in ds.module_split().val)
+    ns = {"_pool": lambda: pool, "_val_module_names": lambda: val}
+    exec(compile(ast.Module(body=[fn], type_ignores=[]), "<vm>", "exec"), ns)
+    return ns["_validation_modules"](), val, pool
+
+
+def test_panel_type_lists_the_whole_validation_set_from_one_source():
+    body = _fn("_validation_modules")
+    assert "_val_module_names()" in body, "resolved through dataset.module_split().val, as p7 --split val"
+    for dup in ("wanted", "between(", "module_split(", "split_modules("):
+        assert dup not in body.split('"""')[-1], f"no second copy of the split logic ({dup})"
+    mods, val, pool = _validation_modules_from_source()
+    names = [n for _, n in mods]
+    assert len(names) == len([m for m in val if m in pool.index]) and len(names) > 1000
+    assert set(names) <= val and len(set(names)) == len(names)
+    assert names == sorted(names)
+    labels = [l for l, _ in mods]
+    assert len(set(labels)) == len(labels) and all(l.startswith(n + " · ") for l, n in mods)
+    assert all("-cell · " in l and l.endswith(" W") for l in labels)
+
+
+def test_panel_type_has_no_placeholder_and_no_silent_fallback():
+    body = _fn("page_panels")
+    assert "Nanum" not in body and "awaiting" not in body
+    assert "label_to_name[pick]" in body, "the chosen label resolves to its own CEC record"
+    assert "_demo_module()[0]" in body, "a stale stored choice resets to the documented demo module, explicitly"
+    for hidden in ("_run_demo(", "sim.MODULE_PRESETS", "DEFAULT_PRESET"):
+        assert hidden not in body
+
+
+def test_tracker_receives_the_sent_module_unchanged():
+    """Watch one run runs exactly scenario_sent['module']; nothing substitutes."""
+    run = _fn("page_run")
+    assert '_run_scenario(_sc["module"], _sc["temp"], _irrkey)' in run
+    branch = run.split('if _sc:')[1].split("else:")[0]
+    for hidden in ("_run_demo(", "_demo_module()", "MODULE_PRESETS"):
+        assert hidden not in branch
+    rs = _fn("_run_scenario")
+    assert "Scenario(module, float(temp), geometry_of(irr), irr, False)" in rs
+
+
+def test_physics_unchanged_for_the_demo_module():
+    """Same module, same conditions, same numbers as before this revision
+    (LG370S2W_A5, 43 °C, 910/300/600 W/m²: GMPP 144.56 W at 24.25 V, 3 peaks)."""
+    import pandas as pd
+    from pvlib import pvsystem
+    from gmppt import config as gcfg, device as eng
+    name = "LG_Electronics_Inc__LG370S2W_A5"
+    r = pvsystem.retrieve_sam("CECMod").T.loc[name]
+    num = lambda k: float(pd.to_numeric(r[k]))
+    mp = eng.ModuleParams(name=name, N_s=int(num("N_s")), alpha_sc=num("alpha_sc"),
+                          a_ref=num("a_ref"), I_L_ref=num("I_L_ref"), I_o_ref=num("I_o_ref"),
+                          R_sh_ref=num("R_sh_ref"), R_s=num("R_s"), Adjust=num("Adjust"))
+    a = eng.analyse(eng.module_iv(mp, [910.0, 300.0, 600.0], 43.0, bd=gcfg.breakdown()))
+    assert abs(a["gmpp"]["P"] - 144.56) < 0.05 and abs(a["gmpp"]["V"] - 24.25) < 0.05
+    assert a["n_peaks"] == 3
 
 
 def test_summary_is_generated_from_state():

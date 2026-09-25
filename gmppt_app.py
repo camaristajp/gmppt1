@@ -40,7 +40,15 @@ from gmppt.hybrid import SEED_PROBE_COST
 
 st.set_page_config(page_title="GMPPT Bench", layout="wide", initial_sidebar_state="collapsed")
 sim.init_state()
-st.session_state.setdefault("gm_theme", "Dark")   # dark is the default on every page; Light stays a switch
+# ONE global theme. `gm_theme` is the header control's key on every page;
+# `gm_theme_pref` is the last explicit choice. Dark unless the user chose
+# otherwise — a default, never rewritten on a rerun. A segmented control can be
+# deselected (its value becomes None): that is not a choice, so the previous
+# preference is restored instead of falling through to light.
+_theme_pref = st.session_state.get("gm_theme_pref", "Dark")
+if st.session_state.get("gm_theme") not in ("Light", "Dark"):
+    st.session_state["gm_theme"] = _theme_pref
+st.session_state["gm_theme_pref"] = st.session_state["gm_theme"]
 st.session_state.setdefault("gm_lang", "EN")     # landing copy only; read in gmppt_hero
 st.session_state.setdefault("gm_anim", "On")     # §6 — global animation switch
 
@@ -337,22 +345,23 @@ def assert_val_modules(names, what="this page") -> bool:
 
 @st.cache_data(show_spinner=False)
 def _validation_modules():
-    """A curated few VALIDATION modules for the panel dropdown."""
+    """Every validation module, for the Panel type dropdown.
+
+    ONE source: `dataset.module_split().val`, resolved through _val_module_names()
+    — the same call `phase2/p7_tracker_comparison.py --split val` makes, whose
+    scenarios come from `scenarios_for_modules(split.val, n)` and keep only these
+    modules. No curated subset and no bands: every validation module the CEC
+    pool carries, labelled with its cell count and STC power so a reader can
+    tell them apart. The name is the CEC record key `_mparams()` resolves, so
+    the module chosen here is the module the validated engine runs.
+
+    Returns [(label, name)] sorted by name.
+    """
     pool = _pool()
-    names = [n for n in _val_module_names() if n in pool.index]
-    h = pool.loc[names].copy()
-    h["P"] = h["V_mp_ref"] * h["I_mp_ref"]
-    wanted = [(72, 330, 350, "72-cell c-Si · 3 bypass diodes · ~340 W"),
-              (60, 270, 290, "60-cell c-Si · 3 bypass diodes · ~280 W"),
-              (72, 300, 330, "72-cell c-Si · 3 bypass diodes · ~315 W")]
-    out, seen = [], set()
-    for nc, lo, hi, lab in wanted:
-        s = h[(h["N_s"] == nc) & (h["P"].between(lo, hi))].sort_values("P")
-        if len(s):
-            nm = str(s.index[len(s) // 2])
-            if nm not in seen:
-                out.append((lab, nm)); seen.add(nm)
-    return out
+    names = sorted(n for n in _val_module_names() if n in pool.index)
+    h = pool.loc[names]
+    P = h["V_mp_ref"] * h["I_mp_ref"]
+    return [(f"{n} · {int(h.at[n, 'N_s'])}-cell · {float(P[n]):.0f} W", n) for n in names]
 
 
 @st.cache_data(show_spinner=False)
@@ -793,8 +802,23 @@ def page_panels():
     st.markdown(f"<style>.bh{{font-family:{disp};font-weight:700;color:{c['text']};font-size:15px;}}"
                 f".bmono,.bmono *{{font-family:{mono};}}"
                 f".gm-status{{font-family:{mono};font-size:12.5px;margin:6px 0;}}"
-                f".gm-badges{{display:flex;flex-direction:column;gap:6px;font-family:{mono};"
-                f"font-size:12.5px;}} .gm-badges span{{display:flex;justify-content:space-between;}}"
+                # the centre column: panel drawing, then one status cell per
+                # section under it, then the panel-level line, then the sentence
+                f".gm-secstrip{{display:grid;grid-template-columns:repeat(3,1fr);gap:6px;"
+                f"box-sizing:border-box;margin:10px auto 0 auto;}}"
+                f".gm-seccell{{display:flex;flex-direction:column;align-items:center;gap:3px;"
+                f"padding:8px 4px;border:1px solid {c['border']};border-radius:10px;"
+                f"background:{c['surface']};text-align:center;min-height:56px;justify-content:center;}}"
+                f".gm-seccell.warn{{border-color:{c['amber_border']};background:{c['amber_tint']};}}"
+                f".gm-seccell .n{{font-family:{mono};font-size:11px;letter-spacing:.06em;"
+                f"color:{c['text_muted']};}}"
+                f".gm-seccell .s{{font-size:12.5px;font-weight:600;line-height:1.25;}}"
+                f".gm-seccell small{{font-family:{mono};font-weight:400;font-size:10px;color:{c['text_muted']};}}"
+                f".gm-panelline{{display:flex;justify-content:space-between;align-items:baseline;"
+                f"margin:10px auto 0 auto;padding:8px 2px 0 2px;border-top:1px solid {c['border']};"
+                f"font-size:13px;color:{c['text_muted']};}}"
+                f".gm-panelline b{{font-family:{mono};font-weight:500;color:{c['text']};}}"
+                f".gm-panelhead{{text-align:center;margin:0 0 6px 0;}}"
                 f"</style>", unsafe_allow_html=True)
     ui.page_intro("Build system",
                   "Build the PV system once, then define what is happening to it right now.",
@@ -834,16 +858,21 @@ def page_panels():
         # from a second copy of the state. The open/closed flags are view state.
         _pp = int(round(float(st.session_state.get("gm_per", 1) or 1)))
         _rr = int(round(float(st.session_state.get("gm_rows", 1) or 1)))
-        _model = str(st.session_state.get("gm_panel") or val_mods[0][0]).split(" · ")[0]
+        labels = [l for l, _ in val_mods]
+        # The documented demo module (a validation module by construction) is
+        # the default. A stored choice that is not in the list — older sessions
+        # kept the three curated labels — is reset to it explicitly, here, so
+        # the selector can never fall back to whatever happens to be first.
+        default_label = next((l for l, n in val_mods if n == _demo_module()[0]), labels[0])
+        if st.session_state.get("gm_panel") not in labels:
+            st.session_state["gm_panel"] = default_label
+        _model = str(st.session_state["gm_panel"]).split(" · ")[0]
         with ui.collapsible("1 · Your PV system", "scenario_system_expanded",
                             summary=f"{_pp * _rr} panel{'s' if _pp * _rr != 1 else ''} · {_model}"):
-            labels = [l for l, _ in val_mods] + ["Nanum target panel — [awaiting spec]"]
-            pick = st.selectbox("Panel type", labels, key="gm_panel")
-            awaiting = pick.startswith("Nanum")
-            name = val_mods[0][1] if awaiting else label_to_name[pick]
-            if awaiting:
-                ui.callout("Nanum's target spec is awaited — a validation module is "
-                           "shown in the meantime.", "", "info")
+            pick = st.selectbox("Panel type", labels, key="gm_panel",
+                                help=f"Every module in the research validation set "
+                                     f"({len(labels):,}). Type to search.")
+            name = label_to_name[pick]
             _unseen_check(name, chip=False)      # the guard only; no data-class chip here
             # Topology, as integers. Older sessions carry floats from the preset
             # dropdowns these controls replaced; they are kept, not reset.
@@ -1026,22 +1055,23 @@ def page_panels():
 
             st.button("Reset inspected panel", key="tool_clear", on_click=_reset_panel,
                       help="Show the first panel again. Nothing else changes.")
-        face, info = st.columns([1, 1.1], vertical_alignment="top")
-        face.markdown(scn.module_face_svg(sel_irr, base_G, c, lab, sel["shadow"]["shape"]),
-                      unsafe_allow_html=True)
-        with info:
-            word = {"on": "bypassed", "partial": "partly bypassed", "off": "working"}
-            badges = "".join(
-                f"<span><span style='color:{c['text_muted']}'>{scn.section_name(k, lab)}</span>"
-                f"<span style='color:{c['amber_text'] if s != 'off' else c['text']}'>"
-                f"{word[s]}{' · bypass ' + s if lab else ''}</span></span>"
-                for k, s in enumerate(states))
-            st.markdown(f"<div class='gm-badges'>{badges}"
-                        f"<span><span style='color:{c['text_muted']}'>{'V_oc' if lab else 'open-circuit'}</span>"
-                        f"<span>{det['voc']:.1f} V</span></span></div>", unsafe_allow_html=True)
-            st.markdown(f"<p style='margin-top:10px;font-size:14px;line-height:1.5'>"
-                        f"{_e(scn.bypass_sentence(states, sel_shaded, det['n_peaks'], lab))}</p>",
-                        unsafe_allow_html=True)
+        # One vertical stack, centred: the panel is the object being configured,
+        # so it is the dominant visual; its three section states sit directly
+        # under the sections they describe; the panel-level open-circuit line
+        # and the generated sentence follow. All of it reads the same engine
+        # results (states from _diode_state, voc / peaks from analyse).
+        vw = scn.PANEL_VISUAL_WIDTH
+        title = "Panel 1" if n_panels == 1 else _e(sel_id)
+        st.markdown(
+            (f"<div class='gm-panelhead'><span class='bh'>{title}</span></div>" if n_panels > 1 else "")
+            + scn.module_face_svg(sel_irr, base_G, c, lab, sel["shadow"]["shape"], width=vw)
+            + scn.section_strip_html(states, lab, c, width=vw)
+            + f"<div class='gm-panelline' style='width:min(100%,{vw}px)'>"
+            f"<span>{'V_oc' if lab else 'Panel open-circuit'}</span><b>{det['voc']:.1f} V</b></div>"
+            + f"<p style='margin:10px auto 0 auto;max-width:{vw + 60}px;text-align:center;"
+            f"font-size:14px;line-height:1.5'>"
+            f"{_e(scn.bypass_sentence(states, sel_shaded, det['n_peaks'], lab))}</p>",
+            unsafe_allow_html=True)
         if lab:
             st.markdown(f"<div class='bmono' style='font-size:11.5px;color:{c['text_muted']}'>"
                         f"{_e(sel_id)} · uid {_e(sel['uid'])} · geometry {_e(geometry_label(sel_irr))} · "

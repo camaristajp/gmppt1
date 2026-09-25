@@ -83,6 +83,41 @@ def test_kpi_row_in_what_it_makes_is_three_equal_siblings():
     assert "Peaks" in seg and "No shadow" in seg
 
 
+def test_centre_is_one_vertical_panel_stack():
+    """The panel is the dominant object: larger, centred, with one status cell
+    per section under it, then the panel-level line, then the sentence. Every
+    value shown comes from the engine results the page already holds."""
+    import gmppt_scenario as scn
+    body = _fn("page_panels")
+    assert "face, info = st.columns" not in body, "the two-column centre is gone"
+    assert "gm-badges" not in body
+    assert "scn.section_strip_html(states, lab, c, width=vw)" in body
+    assert "scn.module_face_svg(sel_irr, base_G, c, lab, sel[\"shadow\"][\"shape\"], width=vw)" in body
+    assert "gm-panelline" in body and "det['voc']" in body
+    assert "scn.bypass_sentence(states, sel_shaded, det['n_peaks'], lab)" in body
+    # larger and responsive, not a fixed pixel width
+    assert scn.PANEL_VISUAL_WIDTH >= 190 * 1.35 and scn.PANEL_VISUAL_WIDTH <= 190 * 1.55
+    svg = scn.module_face_svg([900.0, 900.0, 900.0], 900.0, {"bg": "#0F1A22", "surface_alt": "#1A2B36",
+                              "border_strong": "#335063", "amber": "#E0913F", "text_muted": "#9AA7B0",
+                              "teal": "#2FA3AE", "amber_text": "#F0B06E"}, False)
+    assert 'style="width:min(100%,280px);height:auto;display:block;margin-inline:auto;"' in svg
+    assert 'viewBox="0 0 200 300"' in svg
+    # the strip mirrors the engine states, one cell per section, no inference
+    c = {"amber_text": "#F0B06E", "text": "#F2F4F5"}
+    strip = scn.section_strip_html(["off", "on", "partial"], False, c)
+    assert strip.count("gm-seccell") == 3
+    assert "Working" in strip and "Bypassed" in strip and "Partly bypassed" in strip
+    assert strip.index("Working") < strip.index("Bypassed") < strip.index("Partly bypassed")
+    assert 'style="width:min(100%,280px);padding:0 3.0% 0 7.0%;"' in strip
+    assert "bypass on" in scn.section_strip_html(["on"], True, c)
+    # the sentence is generated from state
+    s = scn.bypass_sentence(["off", "on", "off"], True, 2, False)
+    assert s == ("Section B is bypassed because of the shadow, so current goes around it at the "
+                 "real peak. The panel now has 2 possible power peaks.")
+    assert scn.bypass_sentence(["off"] * 3, False, 1, False) == \
+        "Nothing is shading this panel. Every section works and the curve has 1 peak."
+
+
 def test_collapsible_is_the_native_accessible_expander():
     col = _fn("collapsible", UI_SRC)
     assert "key=key" in col, "keyed: the state lives in session_state"

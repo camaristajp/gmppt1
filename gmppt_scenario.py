@@ -309,25 +309,39 @@ def section_name(k: int, lab: bool) -> str:
     return f"S{k + 1}" if lab else SECTION_NAMES[k] if k < len(SECTION_NAMES) else f"{k + 1}"
 
 
+# The panel drawing and the section-status strip under it share this width, so
+# each status cell sits under its own section. Responsive: the SVG takes the
+# column's width up to this, never more.
+PANEL_VISUAL_WIDTH = 280
+# Inside the 200-unit viewBox, the cell block runs from x = 14 to x = 194; the
+# status strip pads by the same fraction so its three cells line up with A/B/C.
+PANEL_CELLS_INSET = (14 / 200, 6 / 200)      # (left, right) as fractions of width
+
+
 def module_face_svg(entry, base_G: float, c: dict, lab: bool, shape: str = "None",
-                    width: int = 190) -> str:
+                    width: int = PANEL_VISUAL_WIDTH) -> str:
     """One panel seen from the front: 6 × 10 cells, three sections as column
     pairs, the shadow as darkening (and, for a nested entry, only over the
-    affected cell group), a sun whose size follows the light level."""
+    affected cell group), a sun whose size follows the light level.
+
+    Drawn in a fixed 200 × 300 viewBox and sized by the container, so cell
+    borders, labels and the shadow scale together; type inside is set small
+    in viewBox units so it stays modest at the larger rendered size."""
     W, H = 200, 300
     X0, Y0, COLS, ROWS, CW, CH, GAP = 14, 40, 6, 10, 28, 24, 2.2
     n_sub = len(entry)
     per = COLS // n_sub
     cell, line = ("#33556A", "#4A7089") if c.get("bg", "").lower() == "#0f1a22" else ("#DCE8E8", "#A8C0C1")
-    out = [f'<svg viewBox="0 0 {W} {H}" style="width:{width}px;max-width:100%;height:auto;" role="img" '
-           f'aria-label="panel face">',
+    out = [f'<svg viewBox="0 0 {W} {H}" class="gm-panel-visual" '
+           f'style="width:min(100%,{int(width)}px);height:auto;display:block;margin-inline:auto;" '
+           f'role="img" aria-label="panel face">',
            f'<rect x="4" y="30" width="192" height="258" rx="8" fill="{c["surface_alt"]}" '
            f'stroke="{c["border_strong"]}"></rect>']
     # sun
     g = max(0.0, min(1.0, float(base_G) / 1000.0))
     r = 6 + 6 * g
     out.append(f'<circle cx="176" cy="16" r="{r:.1f}" fill="{c["amber"]}" opacity="{0.35 + 0.6 * g:.2f}"></circle>')
-    out.append(f'<text x="8" y="20" font-family="IBM Plex Mono, monospace" font-size="10.5" '
+    out.append(f'<text x="8" y="20" font-family="IBM Plex Mono, monospace" font-size="8.5" '
                f'fill="{c["text_muted"]}">{float(base_G):.0f} W/m²</text>')
     for rr in range(ROWS):
         for cc in range(COLS):
@@ -352,12 +366,32 @@ def module_face_svg(entry, base_G: float, c: dict, lab: bool, shape: str = "None
                 out.append(f'<line x1="{x:.1f}" y1="{Y0 + gi * gh:.1f}" x2="{x + w:.1f}" y2="{Y0 + gi * gh:.1f}" '
                            f'stroke="{c["amber"]}" stroke-width="1" stroke-dasharray="2 2"></line>')
         out.append(f'<text x="{x + w / 2:.1f}" y="{H - 6}" text-anchor="middle" font-family="IBM Plex Mono, monospace" '
-                   f'font-size="11" fill="{c["text_muted"]}">{section_name(s, lab)}</text>')
+                   f'font-size="9" fill="{c["text_muted"]}">{section_name(s, lab)}</text>')
     if shape not in ("None", None):
-        out.append(f'<text x="8" y="{H - 6}" font-family="IBM Plex Mono, monospace" font-size="10" '
+        out.append(f'<text x="8" y="{H - 6}" font-family="IBM Plex Mono, monospace" font-size="8" '
                    f'fill="{c["amber_text"]}">{shape.lower()}</text>')
     out.append("</svg>")
     return "".join(out)
+
+
+STATE_WORD = {"on": "Bypassed", "partial": "Partly bypassed", "off": "Working"}
+
+
+def section_strip_html(states: list[str], lab: bool, c: dict, width: int = PANEL_VISUAL_WIDTH) -> str:
+    """Three equal cells under the panel, one per section, each reading the
+    engine's bypass state for that section (`_diode_state`), aligned with the
+    sections drawn above. No state is inferred here; it is only displayed."""
+    li, ri = PANEL_CELLS_INSET
+    cells = []
+    for k, s in enumerate(states):
+        tone = c["amber_text"] if s != "off" else c["text"]
+        cells.append(
+            f'<div class="gm-seccell{" warn" if s != "off" else ""}">'
+            f'<span class="n">{section_name(k, lab)}</span>'
+            f'<span class="s" style="color:{tone}">{STATE_WORD.get(s, s)}'
+            f'{f"<br><small>bypass {s}</small>" if lab else ""}</span></div>')
+    return (f'<div class="gm-secstrip" style="width:min(100%,{int(width)}px);'
+            f'padding:0 {ri * 100:.1f}% 0 {li * 100:.1f}%;">{"".join(cells)}</div>')
 
 
 def topology_figure(system: dict, shaded_uids: set, selected_uid: str, powers: dict,
@@ -432,14 +466,20 @@ def bypass_sentence(states: list[str], shaded: bool, n_peaks: int, lab: bool) ->
     names = [section_name(k, lab) for k in range(len(states))]
     on = [n for n, s in zip(names, states) if s == "on"]
     partial = [n for n, s in zip(names, states) if s == "partial"]
-    peaks = f"{n_peaks} peak{'s' if n_peaks != 1 else ''}"
+    peaks = f"{n_peaks} possible power peak{'s' if n_peaks != 1 else ''}"
+
+    def sections(ns):
+        return ("Section " if len(ns) == 1 else "Sections ") + " and ".join(ns)
+
     if not shaded:
-        return f"Nothing is shading this panel: every section works and the curve has {peaks}."
+        return (f"Nothing is shading this panel. Every section works and the curve has "
+                f"{n_peaks} peak{'s' if n_peaks != 1 else ''}.")
     if on:
-        return (f"The shadow weakens section {' and '.join(on)}, so its bypass path is active at "
-                f"the real peak and current goes around it. The curve has {peaks}.")
+        return (f"{sections(on)} {'is' if len(on) == 1 else 'are'} bypassed because of the "
+                f"shadow, so current goes around {'it' if len(on) == 1 else 'them'} at the real "
+                f"peak. The panel now has {peaks}.")
     if partial:
-        return (f"The shadow weakens section {' and '.join(partial)}; its bypass path is partly "
-                f"conducting at the real peak. The curve has {peaks}.")
-    return (f"The shadow dims part of this panel, but at the real peak every section still "
-            f"carries the current: no bypass path is active. The curve has {peaks}.")
+        return (f"{sections(partial)} {'is' if len(partial) == 1 else 'are'} partly bypassed "
+                f"because of the shadow. The panel now has {peaks}.")
+    return (f"The shadow dims part of this panel, but no section is bypassed at the real peak. "
+            f"The panel has {peaks}.")
