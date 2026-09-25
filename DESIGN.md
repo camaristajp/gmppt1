@@ -18,14 +18,18 @@ The design spec behind the wireframes, written so it can be applied to the exist
 
 ### The story
 
-The dashboard answers four questions, in order. Each section of the navigation is one question.
+The dashboard is organised around the research experiment lifecycle. Each section of the navigation is one stage of it.
 
 | Section | The question | Who it is mostly for |
 |---|---|---|
-| **Explore** | What actually happens when a shadow falls on a panel? | A visitor, a partner engineer, the professor |
-| **Simulator** | What are the exact numbers for this panel and this shadow? | The researcher — you |
-| **Testing** | Which tracking method copes best, and at what cost? | Supervisor, reviewers, Nanum |
-| **The data** | Why should anyone believe these numbers? | Anyone about to quote them |
+| **Scenario** | What is the physical PV system, and what is happening to it right now? | Everyone — the experiment is defined here, once |
+| **Static test** | Under this one frozen condition, how do P&O, InC, PSO and the proposed method compare? | A visitor, a partner engineer, the professor |
+| **Dynamic test** | When sunlight, temperature and shading change through a day, how quickly and reliably does each method recover the moving peak, and what did that cost? | The researcher, Nanum |
+| **Results** | What does the validated evidence say? | Supervisor, reviewers, Nanum |
+| **Data & validation** | Why should anyone believe these numbers, and where exactly did each come from? | Anyone about to quote them |
+| **Sandbox** | What if I type my own datasheet in? | The researcher — you |
+
+The principle behind it: **Scenario defines the experiment once. The Static and Dynamic tests reuse that same physical PV system. Results reports the validated research evidence separately from the user's exploratory runs, and is never populated by one.** The main scientific comparison is P&O vs InC vs PSO vs the proposed GMPPT method under the same challenge; the per-panel optimiser is the hardware context the algorithms run in, not the thing being compared.
 
 A first-time visitor reads left to right. An expert jumps straight to the section they need. The story works both ways because every page states its own question in its title and lead sentence.
 
@@ -47,48 +51,78 @@ Every page should be traceable to one clause of that sentence. If a panel on a p
 
 ## 2. Information architecture
 
-| Section | Page | Answers | URL | Status | Built from |
+| Section | Page | Answers | URL | Reads | Engine |
 |---|---|---|---|---|---|
-| — | Home | What is this? | `/home` | Ready | new |
-| Explore | The panels | What does a shadow do to the curve? | `/panels` | Ready (single panel) | `module_iv`, `object_to_sub_irr`, `what_happened` |
-| Explore | Inside a panel | Why does the curve get extra peaks? | `/panel` | Ready | `module_iv` → `sub_curves` |
-| Explore | Whole system | How much electricity reaches the grid? | `/system` | Coming | needs a string + inverter model |
-| Simulator | Set up a panel | Exact numbers for this panel | `/simulator` | Ready | `render_simulator` (yours) |
-| Simulator | Saved scenarios | Reload and compare saved cases | `/saved` | Ready | `render_scenarios_section` (yours) |
-| Simulator | Make a dataset | Thousands of cases, with a seed | `/make-dataset` | Ready | `render_dataset_section` (yours) |
-| Testing | Watch one run | What does each method do on one curve? | `/run` | Coming | needs per-step traces from p7/p9 |
-| Testing | Compare methods | Which method is best, and what does it cost? | `/compare` | Snapshot | report numbers; replace with harness export |
-| Testing | Moving light | Does it hold through a day? | `/moving-light` | Snapshot + coming | needs per-step logging from p10 |
-| The data | The dataset | What is in the scenario set? | `/data` | Ready when a dataset exists | `generate_dataset` dataframe |
-| The data | Where it comes from | How was this validated, and what can it not say? | `/sources` | Ready | `page_validation` (yours) |
+| — | Home | What is this? | `/home` | — | schematic |
+| Scenario | Build system | What is the PV system, and what is happening to it right now? | `/panels` | writes `scenario_draft`; Send copies it to `scenario_sent` | validated |
+| Scenario | PV analysis | Why does this condition give this curve? | `/panel` | `scenario_draft` | validated |
+| Static test | One run | What does each method do on this one frozen condition? | `/run` | `scenario_sent` | validated |
+| Static test | Compare methods | P&O, InC, PSO and the proposed method on the same condition | `/compare-methods` | `scenario_sent` | validated |
+| Dynamic test | Timeline | The same system with G(t), T(t), Shade(t) | `/timeline` | `scenario_sent` system → writes `dynamic_scenario` | validated |
+| Dynamic test | Tracker response | How does each method follow the moving peak? | `/tracker-response` | `dynamic_scenario` | validated |
+| Dynamic test | Energy | What did tracking cost or recover over the day? | `/energy` | `dynamic_scenario` | validated |
+| Results | Research summary | The validated findings in four numbers | `/summary` | phase-2 exports only | — |
+| Results | Static performance | The validated static partial-shading result | `/compare` | phase-2 exports only | — |
+| Results | Dynamic performance | The validated EN 50530 and relocation results | `/dynamic-performance` | phase-2 exports only | — |
+| Results | Targets | The project's objectives beside what was measured | `/results` | phase-2 exports only | — |
+| Data & validation | Benchmark set | What the results were measured on | `/benchmark-set` | phase-2 exports | — |
+| Data & validation | PV model validation | How the device model was validated, and its limits | `/validation` | `page_validation` (app.py) | — |
+| Data & validation | Experiment provenance | Which script, export, split, seed and model produced each figure | `/sources` | every export's header | — |
+| Sandbox | Simulator | Exact numbers for a typed-in datasheet | `/simulator` | its own state | simplified |
+| Sandbox | Saved scenarios | Reload and compare saved cases | `/saved` | `frozen` | simplified |
+| Sandbox | Sweep | Presets across a temperature × irradiance grid | `/sweep` | `render_sweep` (app.py) | simplified |
+| Sandbox | Dataset generator | Thousands of cases with a seed, and what came out | `/make-dataset` | `render_dataset_section` (app.py) | simplified |
 
-Nothing in your existing app is thrown away. Its six sections all have a home: Home → Home, Simulator → Set up a panel, Analysis → the simulator's own tabs, Dataset → Make a dataset, Scenarios → Saved scenarios, Validation → Where it comes from. The existing app becomes the **Simulator** section; **Explore** and **Testing** are what is new.
+Two things never mix. **Static test / Dynamic test = the user's scenario**, exploratory, labelled `Exploratory` on every page. **Results = validated research evidence**, read from the harness exports and labelled `Benchmark result`; no interactive run, and nothing from the Sandbox, ever populates it. The Sandbox carries a persistent `Sandbox · simplified engine · not benchmark evidence` indicator on every page.
+
+Nothing in the original app is thrown away: Simulator → Sandbox · Simulator, Scenarios → Saved scenarios, the parametric sweep → Sweep, Dataset → Dataset generator, Validation → PV model validation.
 
 ### Navigation
 
-Two levels, never three. Section tabs across the top (Explore · Simulator · Testing · The data), page links inside each section. View switches live inside a page as pills. The wordmark always returns home.
+Two levels, never three. The six research sections across the top — SCENARIO · STATIC TEST · DYNAMIC TEST · RESULTS · DATA & VALIDATION, then SANDBOX behind a thin gap — with **no arrows**: the header is navigation, not a progress indicator. Under it, the current section's pages, the active one on a lighter underline-and-tint treatment than the section's filled pill. View switches live inside a page as pills. The wordmark always returns home. Nothing unbuilt sits in the header.
+
+### State flow
+
+```
+Scenario · Build system ──► scenario_draft ──► Send ──► scenario_sent ──► Static test (One run, Compare methods)
+                                                              │
+                                                 physical topology only (base_system_hash)
+                                                              ▼
+                                       Dynamic test · Timeline ──► dynamic_scenario ──► Tracker response ──► Energy
+
+Results ◄── phase-2 exports only (never scenario_sent, dynamic_scenario, a tracker run, or the Sandbox)
+```
+
+The dynamic timeline inherits the PV system (module, n_series, n_parallel, panel uids, connections, optimiser architecture) from the sent scenario and never rebuilds it; it carries `base_system_hash`, so a topology change on Build system is detected as "system changed — timeline reviewed" rather than silently applied. Time is minutes after midnight on every page. One shadow function (`gmppt_timeline.state_at`) feeds both the drawings and the engine, so a picture can never disagree with the physics it stands beside.
 
 ---
 
 ## 3. The flow
 
-Each page ends with exactly one "Next" bar that says *why* you would go on, then links there:
+Each page ends with one footer that says *why* you would go on, then links there. The guided journey is numbered (step n of 8) and nobody is forced along it — the header reaches every page directly:
 
 ```
-Home ──► The panels ──► Inside a panel ──► Watch one run ──► Compare methods ──► Moving light ──► The dataset
-                                                  ▲
-Whole system ────────────────────────────────────┘ (to Compare methods)
-Simulator pages ──► "Send to the trackers" (Watch one run)
+Home ──► Build system ──► PV analysis ──► One run ──► Compare methods ──► Timeline ──► Tracker response ──► Energy ──► Research summary
+                                                                                                                              │
+                                                       Results and Data & validation continue with Previous / Next inside their section, unnumbered
 ```
 
 | From | Next-step sentence | To |
 |---|---|---|
-| The panels | You have seen the curve grow extra peaks. Now look at why. | Inside a panel |
-| Inside a panel | You know why there are several peaks. Now watch each method try to find the tallest. | Watch one run |
-| Whole system | The energy figures rest on the tracking result. See how it was measured. | Compare methods |
-| Watch one run | One curve proves nothing on its own. See every method on every shaded case. | Compare methods |
-| Compare methods | Now see whether it holds when the light moves. | Moving light |
-| Moving light | Every number so far rests on a dataset. See what is in it. | The dataset |
+| Build system | You have a system and a condition. Read why its curve has more than one peak. | PV analysis |
+| PV analysis | You know why the peaks are there. Watch one method try to find the tallest. | One run |
+| One run | Now every baseline and the proposed method on this same condition. | Compare methods |
+| Compare methods | The condition was frozen. Let it change through a day. | Timeline |
+| Timeline | Send the timeline through the trackers. | Tracker response |
+| Tracker response | What did trapping and slow recovery cost over the day? | Energy |
+| Energy | Your runs were exploratory. Read the validated evidence. | Research summary |
+| Research summary | The static result in full, with its caveats. | Static performance |
+
+Data & validation and the Sandbox are reference and utility sections; they do not take part in the numbered journey.
+
+### Visualisation is functional
+
+Every stage shows what is physically happening and what the tracker is doing before it shows a number, and every drawing is driven by the same state and engine output as the numbers beside it: Build system's panel face, bypass badges and P–V curve all come from one `module_iv` call; PV analysis lays shading → section irradiance → bypass state → P–V landscape → peaks in one row; One run and Compare methods draw every method's start, path and stop on the same landscape, with playback of the recorded trajectories (nothing re-run); Timeline previews the system, the tracked panel's face and its curve at the playhead from `gmppt_timeline.state_at`; Tracker response synchronises the system view, the curve with each tracker's operating point, and the power-over-time chart on one playhead, marking condition changes and where each method settled again; Energy shows the captured share and the shaded loss area. Animation is used where the quantity really changes sequentially (a moving shadow, a search, a re-convergence) and never on Results, which stays static evidence. Cards keep fixed positions during playback; values change, layout does not.
 
 ---
 
@@ -180,9 +214,11 @@ Spacing steps: 4 · 8 · 12 · 16 · 24 · 32 px. Radii: 8 (inputs), 10 (buttons
 
 Dark is the default theme on every page; Light is the switch. Behind the landing only, a slow moving ground (`gmppt_hero.backdrop`): a dawn glow, a faint cell lattice and patches of light drifting across it like light through cloud (cloud shadows on the paper in Light), parked under reduced motion or Animations off. Landing-only top bar (mark, wordmark, EN/KO, Light/Dark — no section or page tabs; every other page keeps `ui.app_header`). Hero on the left (eyebrow pill, three-line title with GMPPT teal / Bench amber, one-sentence lead, **Start exploring →** teal link to The panels, **▶ Watch a worked example** outline link to Watch one run, the "no account and no setup … 616 flash tests" fine print). On the right, the landing figure in a white card: the same panel unshaded and shaded as two layers with a draggable divider (opens at 50 %), chips `UNSHADED` / `SHADOW ACROSS THE STRIPS`, one amber dot on the true peak and hollow grey rings on the traps, captions inside the figure, "Drag the divider" under it, and a `schematic` note under the card — both curves drawn live by `app.module_iv` (1000/1000/1000 and 1000/250/600 W/m²), never an image. Built in `gmppt_hero.py` as an `st.iframe` document (inline SVG + range input); colours are passed in from `ui.T()`. Below: "What you can do here", five cards, each linking to its page; then the one-line footer.
 
-### 6.2 Explore · The panels
+### 6.2 Scenario · Build system
 
-*Question: what does a shadow do to the curve?* **Built** — see `page_panels` and `gmppt_scene.py`.
+*Question: what is the PV system, and what is happening to it right now?* **Built** — `page_panels` (url slug `panels` kept) with `gmppt_scenario.py` for state, identity, hashes, time and drawing. The day-event editor that used to sit under this page is gone: the day is now **Dynamic test · Timeline** (`gmppt_timeline.py`), which inherits the system sent from here. The page owns the **PV system** (module, panels in a row = n_series, rows = n_parallel, per-panel optimisers, blocking diodes, stable panel uids) and one **static condition** (time in minutes after midnight, sunlight, cell temperature, per-panel shading: Pole / Tree / Leaf / Dirt / Cloud / None, how dark, where it falls). Three columns: 1 · Your PV system, 2 · Conditions, 3 · Shading (for the selected panel) on the left; the topology drawing (rows in series, DC bus in parallel, clickable) and the selected panel's face with section bypass badges and a generated sentence in the centre; 4 · What it makes (This panel → `module_iv`, The row → `string_iv`, Whole system → `array_iv` plus the per-panel-optimiser sum and the "with one shared tracker instead" strip) and 5 · Hand it to the tracker (summary, ● not sent yet / sent / changed since sent, Send this setup) on the right. The selected panel and the chart scope are view state and never touch either hash. `system_hash` (hardware) and `scenario_hash` (hardware + condition) let the static tracker page and the future dynamic timeline inherit the system without rebuilding it. The old day-event editor sits below, unchanged and unconnected, pending its migration to canonical minutes. The previous description of this page follows for the parts it still shares.
+
+*Was: Explore · The panels — what does a shadow do to the curve?* See `gmppt_scene.py` for the day-event drawing.
 
 Three columns and a full-width timeline. Left: **1 · The panels** (model, rows, per row, portrait/landscape, cell strips), **2 · Shading events** (an editable table: event, from, to, dark %, size %), **3 · Conditions** (collapsed: sunlight, temperature). Centre: a time-of-day slider, "Your panels at 11:00", the array drawn top-down with the shadows on it — click a panel to inspect it — and three readouts (all panels right now as the hero, shaded panels, shadow type). Right: the selected panel's face cell by cell, each strip's light and diode state, its P-V curve with the strip bands and a Shaded / Unshaded / Both switch, a plain link to send it to the trackers, then *What happened*, *What the algorithm gets to see*, and the engine badge. Below: the palette of ten events, the day timeline with the playhead, and a strip counting the selected panel's peaks through the day. Next: Inside a panel.
 

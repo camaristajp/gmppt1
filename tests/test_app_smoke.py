@@ -6,11 +6,11 @@ depends on (T5, T11), and the pure helpers that decide what a figure is labelled
 (geometry, scenario hashing, readings).
 
 The tests that need a rendered page — persistence across navigation (T1), session
-survival (T2), day-event key stability (T3), scenario coherence (T4) and the
-missing-export behaviour (T6) — are driven through Chrome DevTools against a
-running server; see CHANGELOG_dashboard.md for how they were run and what they
-reported. AppTest cannot drive them, because its switch_page only resolves
-file-based pages and this app uses st.navigation.
+survival (T2), scenario coherence (T4) and the missing-export behaviour (T6) —
+were driven through Chrome DevTools against a running server; see
+CHANGELOG_dashboard.md. tests/test_pages_render.py renders every navigation page
+and walks the workflow headlessly through AppTest (selecting st.navigation
+pages by url_path through the registry the first run fills).
 
 Run:  python -m pytest tests/test_app_smoke.py -q
 """
@@ -368,31 +368,30 @@ def _load_helpers(extra=(), consts=()):
 # Phase B — U3 panel navigation, U4 record fields, T12 event windows
 # --------------------------------------------------------------------------- #
 def test_T12_event_window_follows_the_playhead():
-    """A new event starts at the selected hour and keeps its 1.5 h duration,
-    shifting left rather than shrinking when the playhead is near 18:00."""
-    h = _load_helpers({"_day_window_from_hour"})
-    win = h["_day_window_from_hour"]
-
-    def hours(hour, duration=1.5):
-        t0, t1 = win(hour, duration)
-        return round(6 + t0 * 12, 4), round(6 + t1 * 12, 4)
+    """A new timeline event starts at the playhead and keeps its default
+    duration, shifting left rather than shrinking near 18:00. Canonical
+    minutes after midnight throughout — the day-fraction mapping is gone."""
+    import gmppt_timeline as tl
+    win = tl.window_from_minutes
+    assert "day_fraction" not in SRC and "_day_window_from_hour" not in SRC
+    assert "6.0 + t * 12" not in SRC and "(time_hour - 6.0) / 12.0" not in SRC
 
     # Away from the right edge, the event starts exactly at the playhead.
-    for hour in (8.0, 12.0, 15.0, 16.5):
-        start, end = hours(hour)
-        assert start == hour, f"event at {hour} started at {start}"
-        assert round(end - start, 4) == 1.5, f"duration at {hour} was {end - start}"
+    for m in (8 * 60, 12 * 60, 15 * 60, 16 * 60 + 30):
+        start, end = win(m)
+        assert start == m, f"event at {m} started at {start}"
+        assert end - start == tl.DEFAULT_EVENT_MINUTES
     # Near 18:00 it shifts left and keeps its length rather than being truncated,
     # and the window still covers the tick the user clicked at.
-    for hour in (17.0, 17.5, 18.0):
-        start, end = hours(hour)
-        assert end == 18.0, f"event at {hour} ended at {end}"
-        assert round(end - start, 4) == 1.5, f"duration at {hour} was {end - start}"
-        assert start <= hour <= end, f"window {start}-{end} does not cover {hour}"
+    for m in (17 * 60, 17 * 60 + 30, 18 * 60):
+        start, end = win(m)
+        assert end == tl.DAY_END, f"event at {m} ended at {end}"
+        assert end - start == tl.DEFAULT_EVENT_MINUTES
+        assert start <= m <= end
     # and never leaves the day
-    for hour in (5.0, 6.0, 19.0):
-        start, end = hours(hour)
-        assert 6.0 <= start <= end <= 18.0
+    for m in (5 * 60, 6 * 60, 19 * 60):
+        start, end = win(m)
+        assert tl.DAY_START <= start <= end <= tl.DAY_END
 
 
 def test_T13_panel_navigation_is_bounded_and_scoped():
@@ -429,14 +428,18 @@ def test_T13_panel_navigation_touches_only_the_inspected_panel():
 
 
 def test_U4_day_record_carries_every_declared_field():
-    """The sampled record must let a reader reconstruct why the curve looks so."""
-    for field in ("\"source\"", "\"time_hour\"", "\"time_label\"", "\"module_source\"",
+    """The sampled record must let a reader reconstruct why the curve looks so.
+    It is built by gmppt_timeline.sample_records, in canonical minutes."""
+    TL = (ROOT / "gmppt_timeline.py").read_text(encoding="utf-8")
+    body = TL.split("def sample_records(")[1].split("\ndef ")[0]
+    for field in ("\"source\"", "\"time_minutes\"", "\"time_label\"", "\"module_source\"",
                   "\"module_applied\"", "\"temperature_C\"", "\"base_irradiance_Wm2\"",
                   "\"substring_irradiance_Wm2\"", "\"scenario_hash\"", "\"events\""):
-        assert field in SRC, f"day-event record is missing {field}"
-    for per_event in ("\"kind\"", "\"uid\"", "\"start_hour\"", "\"end_hour\"",
-                      "\"duration_hours\"", "\"motion\""):
-        assert per_event in SRC, f"per-event detail is missing {per_event}"
+        assert field in body, f"timeline record is missing {field}"
+    for per_event in ("\"kind\"", "\"uid\"", "\"start_minutes\"", "\"end_minutes\"",
+                      "\"duration_minutes\"", "\"motion\""):
+        assert per_event in body, f"per-event detail is missing {per_event}"
+    assert "time_hour" not in body and "start_hour" not in body, "no hour fractions"
 
 
 def test_U4_import_sentence_is_shared_by_message_and_record():
@@ -629,7 +632,9 @@ def test_T36_aggregate_pages_build_no_animation():
     """Compare, Results, Benchmark set and Sources must stay static."""
     import ast
     tree = ast.parse(SRC)
-    aggregate = {"page_compare", "page_results", "page_benchset", "page_sources"}
+    aggregate = {"page_compare", "page_results", "page_benchset", "page_provenance",
+                 "page_summary", "page_dynamic_perf", "page_validation_model",
+                 "_relocation_section", "_dynamic_export_block"}
     banned = ("trace_player", "curve_morph", "anim_badge", "snapshot_strip",
               "anim_exports")
     for node in ast.walk(tree):
@@ -828,8 +833,8 @@ def test_user_facing_components_exist():
     for name in ("data_chip", "unavailable", "stepper", "tutorial", "section_head",
                  "term_tip"):
         assert callable(getattr(ui, name)), f"missing UI component {name}"
-    assert ui.FLOW_STAGES == ["Understand", "Inspect", "Watch", "Compare",
-                              "Explore", "Results"]
+    assert ui.FLOW_STAGES == ["Scenario", "Static test", "Dynamic test", "Results",
+                              "Data & validation"]
 
 
 def _stages():
@@ -862,7 +867,9 @@ def test_one_workflow_table_drives_everything():
                if isinstance(n, ast.Constant) and isinstance(n.value, str)]
     for stale in ("Explore · Inside a panel", "Explore · The panels",
                   "Testing · ", "sent to Testing", "all of Testing",
-                  "Testing benchmarks", "Testing reads", "Simulator · Set up"):
+                  "Testing benchmarks", "Testing reads", "Simulator · Set up",
+                  # the tutorial-style labels the research-workflow revision removed
+                  "Understand · ", "Inspect · ", "Watch · ", "Compare · ", "Explore · "):
         hits = [s for s in strings if stale in s and len(s) < 400]
         assert not hits, f"stale navigation vocabulary {stale!r}: {hits[:2]}"
     # and no page_intro still names a header section as its eyebrow
@@ -871,16 +878,120 @@ def test_one_workflow_table_drives_everything():
         raise AssertionError(f"eyebrow still uses a section name: {m.group(0)[-40:]}")
 
 
+def _eyebrows():
+    """(title, eyebrow) of every ui.page_intro call, read from the AST."""
+    import ast
+    out = []
+    for node in ast.walk(ast.parse(SRC)):
+        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "page_intro" and len(node.args) >= 3
+                and isinstance(node.args[0], ast.Constant)
+                and isinstance(node.args[2], ast.Constant)):
+            out.append((node.args[0].value, node.args[2].value))
+    return out
+
+
 def test_every_journey_page_eyebrow_names_its_stage():
-    """§4: the eyebrow says INSPECT · Inside a panel, never a header section."""
-    import re
+    """The eyebrow says SECTION · page, and the section is one of the six."""
     stages, sandbox = _stages()
-    stage_of = {k: s for s, ks in stages for k in ks}
-    for m in re.finditer(r'ui\.page_intro\(\s*"([^"]+)"[\s\S]*?"([A-Z][a-z]+) · ', SRC):
-        title, stage = m.group(1), m.group(2)
-        assert stage in dict(stages) or stage == "Sandbox", \
-            f"{title!r} has eyebrow stage {stage!r}, which is not a workflow stage"
-    assert '"Inspect · Inside a panel"' in SRC
+    names = {s for s, _ in stages} | {"Sandbox"}
+    eyebrows = _eyebrows()
+    assert eyebrows, "expected page_intro calls with an eyebrow"
+    for title, eyebrow in eyebrows:
+        assert " · " in eyebrow, f"{title!r} eyebrow {eyebrow!r} has no section"
+        sec = eyebrow.split(" · ")[0]
+        assert sec in names, f"{title!r} has eyebrow section {sec!r}, not a research section"
+    assert '"Scenario · PV analysis"' in SRC and '"Scenario · Build system"' in SRC
+
+
+def test_header_is_the_six_research_sections_without_arrows():
+    """Acceptance 1–3: exactly the six major sections, old labels gone, no
+    arrows in the global navigation, each section exposing only its own pages."""
+    stages, sandbox = _stages()
+    assert [s for s, _ in stages] == ["Scenario", "Static test", "Dynamic test",
+                                       "Results", "Data & validation"]
+    assert sandbox == ["sim_setup", "sim_saved", "sim_sweep", "sim_dataset"]
+    assert dict(stages) == {
+        "Scenario": ["panels", "inside"],
+        "Static test": ["run", "static_compare"],
+        "Dynamic test": ["timeline", "tracker_response", "energy"],
+        "Results": ["summary", "compare", "dynamic_perf", "results"],
+        "Data & validation": ["benchset", "validation", "sources"],
+    }
+    for old in ("Understand", "Inspect", "Watch", "Explore"):
+        assert old not in [s for s, _ in stages]
+    hdr = UI_SRC.split("def app_header(")[1].split("\ndef ")[0]
+    assert "→" not in hdr, "the global header is navigation, not a progress indicator"
+    assert "gm-stage-sep" not in hdr
+    # every page in the table is built, so nothing is offered as "coming"
+    assert "(None," not in SRC.split("_PAGE_FUNCS = {")[1].split("\n}")[0], \
+        "no unbuilt page sits in the navigation table"
+
+
+def test_results_pages_read_exports_not_interactive_state():
+    """Acceptance 8: Results reads validated exports only — never scenario_sent,
+    the dynamic scenario, or a tracker run."""
+    import ast
+    tree = ast.parse(SRC)
+    banned = ("scenario_sent", "scenario_draft", "dynamic_scenario", "_run_scenario(",
+              "_timeline_run(", "_dynamic_day(", "st.session_state.get(\"frozen\"")
+    for name in ("page_summary", "page_compare", "page_dynamic_perf", "page_results",
+                 "_relocation_section", "_dynamic_export_block"):
+        fn = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == name)
+        body = ast.get_source_segment(SRC, fn) or ""
+        for b in banned:
+            assert b not in body, f"{name} touches {b}"
+        assert "_load_json(" in body or "missing_export(" in body or "_export_block" in body, \
+            f"{name} must read a harness export"
+
+
+def test_dynamic_test_inherits_the_sent_system():
+    """Acceptance 4–6: the Dynamic test never rebuilds the topology; it reads
+    the sent scenario's system and carries base_system_hash."""
+    import ast
+    tree = ast.parse(SRC)
+    tl_src = (ROOT / "gmppt_timeline.py").read_text(encoding="utf-8")
+    inherit = ast.get_source_segment(SRC, next(
+        n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == "_tl_inherit"))
+    assert 'st.session_state.get("scenario_sent")' in inherit
+    assert 'sent["system"], sent["system_hash"]' in inherit
+    for page in ("page_timeline", "page_tracker_response", "page_energy"):
+        body = ast.get_source_segment(SRC, next(
+            n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == page))
+        for rebuild in ("migrate_panels(", "n_series = int(st.number_input", "scenario_system"):
+            assert rebuild not in body, f"{page} rebuilds the topology ({rebuild})"
+    assert "base_system_hash" in tl_src and '"base_system_hash"' in SRC
+    # the runner is the harness's dynamic trajectory, scored by its own metrics
+    run_src = ast.get_source_segment(SRC, next(
+        n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == "_timeline_run"))
+    assert "dyn.DynamicTrajectory(" in run_src and "tj.metrics()" in run_src
+    assert "REACH_TOLERANCE" in run_src and "tl.reconvergence_steps(" in run_src
+
+
+def test_static_test_runs_the_sent_scenario():
+    """Acceptance 5: both Static test pages consume scenario_sent through one rule."""
+    import ast
+    tree = ast.parse(SRC)
+    rule = ast.get_source_segment(SRC, next(
+        n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == "_static_scenario"))
+    assert 'st.session_state.get("scenario_sent")' in rule and "_run_demo()" in rule
+    body = ast.get_source_segment(SRC, next(
+        n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == "page_static_compare"))
+    assert "_static_scenario(" in body and "_score_traj" not in body, \
+        "Compare methods must reuse the run, never re-score it"
+    assert "Trajectory.metrics" in body, "definitions are named as the harness's"
+
+
+def test_sandbox_is_separated_and_labelled():
+    """Acceptance 10: the persistent Sandbox indicator, and no Sandbox output on Results."""
+    assert "Sandbox · simplified engine · not benchmark evidence" in SRC
+    import ast
+    tree = ast.parse(SRC)
+    for name in ("page_summary", "page_compare", "page_dynamic_perf", "page_results"):
+        body = ast.get_source_segment(SRC, next(
+            n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == name))
+        for b in ("sim.", "frozen", "sweep_results", "bench_"):
+            assert b not in body, f"{name} reads Sandbox state ({b})"
 
 
 def test_tutorial_targets_real_controls_only():

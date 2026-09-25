@@ -1,22 +1,27 @@
 """
-gmppt_app.py — new entry point for the GMPPT Bench dashboard.
+gmppt_app.py — entry point for the GMPPT Bench dashboard.
 
-Wraps your existing app.py (kept unchanged, imported as `sim`) in the new
-four-section navigation and the gmppt_ui design system.
+Wraps the existing app.py (kept unchanged, imported as `sim`) in the research
+workflow navigation and the gmppt_ui design system.
 
     Run:  streamlit run gmppt_app.py
-    Needs: streamlit >= 1.40, plotly, numpy, pandas — plus app.py and gmppt_ui.py
-           in the same folder.
+    Needs: streamlit >= 1.63, plotly, numpy, pandas — plus app.py, gmppt_ui.py,
+           gmppt_hero.py, gmppt_scenario.py and gmppt_timeline.py in the same folder.
 
-Sections (see DESIGN.md §2):
-    Home
-    Explore     The panels · Inside a panel · Whole system
-    Simulator   Set up a panel · Saved scenarios · Make a dataset   <- your existing app
-    Testing     Watch one run · Compare methods · Dynamic irradiance
-    The data    The dataset · Where it comes from
+Sections — the research experiment lifecycle (see DESIGN.md §2):
+    SCENARIO           Build system · PV analysis
+    STATIC TEST        One run · Compare methods            (the user's scenario)
+    DYNAMIC TEST       Timeline · Tracker response · Energy (the user's scenario)
+    RESULTS            Research summary · Static performance · Dynamic performance ·
+                       Targets                              (validated exports only)
+    DATA & VALIDATION  Benchmark set · PV model validation · Experiment provenance
+    SANDBOX            Simulator · Saved scenarios · Sweep · Dataset generator
 
-Only genuinely unimplemented features are labelled as planned/not built. Implemented
-pages are navigable and must not be presented as "coming".
+The principle: Scenario defines the experiment once; the Static and Dynamic
+tests reuse that same physical PV system; Results reports the validated
+research evidence separately from the user's exploratory runs, and is never
+populated by one. Visualisation is functional here, not decoration: every
+drawing is driven by the same state and engine output as the numbers beside it.
 """
 from __future__ import annotations
 
@@ -27,6 +32,8 @@ import streamlit as st
 
 import app as sim          # your existing simulator — physics, presets, pages
 import gmppt_hero as hero  # the landing page
+import gmppt_scenario as scn  # Scenario page state: system / condition / hashes / time
+import gmppt_timeline as tl   # Dynamic test: G(t), T(t), Shade(t) on the inherited system
 import gmppt_ui as ui
 from gmppt import config as _gcfg, dataset as _ds, device as _eng, scenarios as _scen
 from gmppt.hybrid import SEED_PROBE_COST
@@ -65,8 +72,8 @@ def _tutorial_steps():
     card = lambda k: f".st-key-gm-card-{k}"
     return [
         {"target": ".st-key-hero-primary a", "title": "Start here",
-         "body": "This button takes you to The panels, the first step of the "
-                 "journey. Everything else on this page is a shortcut into it."},
+         "body": "This button takes you to Scenario · Build system, the first step "
+                 "of the journey. Everything else on this page is a shortcut into it."},
         {"target": card("sim_setup"), "title": "Build the panel",
          "body": "Pick a module and set the sunlight and the cell temperature, "
                  "starting from a clean unshaded curve."},
@@ -80,8 +87,8 @@ def _tutorial_steps():
          "body": "Send the scenario to the tracking methods and watch how each "
                  "one searches the same curve."},
         {"target": card("compare"), "title": "Compare and export",
-         "body": "See what each method captured and how long it took, and take "
-                 "the tables and figures away as files."},
+         "body": "The validated result: what each method captured over the whole "
+                 "validation set, and the tables and figures as files."},
         {"target": ".st-key-hero-secondary a", "title": "Or watch first",
          "body": "Prefer to see it before you touch anything? This opens a "
                  "worked example with a shadow already in place."},
@@ -110,7 +117,8 @@ def _session_io():
                 except Exception as e:
                     st.error(f"Not a session file: {e}")
                 else:
-                    for k in ("scenario_draft", "scenario_sent", "frozen", "day_events"):
+                    for k in ("scenario_system", "scenario_draft", "scenario_sent", "frozen",
+                              "day_events", "tl_events", "dynamic_scenario"):
                         if k in blob:
                             st.session_state[k] = blob[k]
                     st.toast("Session restored.")
@@ -133,10 +141,12 @@ def _session_blob() -> str:
         except Exception:
             exports[rel] = {"unreadable": True}
     return json.dumps({
+        "scenario_system": st.session_state.get("scenario_system"),
         "scenario_draft": st.session_state.get("scenario_draft"),
         "scenario_sent": st.session_state.get("scenario_sent"),
         "frozen": st.session_state.get("frozen", []),
-        "day_events": st.session_state.get("day_events", []),
+        "tl_events": st.session_state.get("tl_events", []),
+        "dynamic_scenario": st.session_state.get("dynamic_scenario"),
         "exports": exports,
     }, indent=2, default=str)
 
@@ -449,68 +459,22 @@ def _diode_state(vk, clamp):
     return "partial" if vk < -0.05 else "off"
 
 
-def _event_pattern(obj, depth, width, runs, edge, base_G,
-                   n_sub=_gcfg.N_SUBSTRINGS, n_groups=3):
-    """Map the shadow controls to a per-substring irradiance argument for the
-    validated engine. 'across' -> sub-substring on every strip (deepest multi-
-    peak); 'along' -> whole strips shaded; 'diagonally' -> a staircase; cloud /
-    soiling -> a graded blanket over the whole module."""
-    lvl = float(depth)
-    if edge.startswith("soft"):
-        lvl = (lvl + base_G) / 2.0
-
-    def grp(n_shaded):
-        g = [float(base_G)] * n_groups
-        for k in range(int(min(n_shaded, n_groups))):
-            g[k] = lvl if not (edge.startswith("dappled") and k % 2) else (lvl + base_G) / 2.0
-        return g
-
-    if obj in ("Cloud", "Soiling"):
-        return [max(lvl, base_G * f) for f in (0.55, 0.70, 0.85)][:n_sub]
-    if runs.startswith("along"):
-        ns = max(1, min(n_sub - 1, round(width * n_sub)))
-        return [lvl if s < ns else float(base_G) for s in range(n_sub)]
-    if runs.startswith("diag"):
-        return [grp(max(1, round(width * (s + 1)))) for s in range(n_sub)]
-    ns = max(1, min(n_groups, round(width * n_groups)))
-    return [grp(ns) for _ in range(n_sub)]
-
-
 # --------------------------------------------------------------------------- #
 # The scenario store. Two states, one shape (R3).
 #
-#   scenario_draft  what The panels is showing right now — rewritten every render
-#   scenario_sent   what Testing is running — written only by "Send to trackers"
+#   scenario_draft  what Build system is showing right now — rewritten every render
+#   scenario_sent   what the Static and Dynamic tests run — written only by Send
 #
-# Keeping them apart is what lets the banner say "edited since sent" instead of
-# letting an edit on Explore silently change the curve a Testing page already
-# drew. `hash` is what the two are compared on.
+# Keeping them apart is what lets a page say "edited since sent" instead of
+# letting an edit on Build system silently change the curve a test page already
+# drew. `hash` is what the two are compared on. Records are built by
+# gmppt_scenario.build_draft; _scenario_hash below is the legacy module-level
+# hash the Sandbox import records still carry.
 # --------------------------------------------------------------------------- #
-def _scenario(module, temp, irr, label) -> dict:
-    import datetime as _d
-    irr_l = [list(e) if isinstance(e, (list, tuple)) else float(e) for e in irr]
-    return {"module": str(module), "temp": float(temp), "label": str(label),
-            "irr": irr_l,
-            "geometry": geometry_of(irr_l),
-            "geometry_label": geometry_label(irr_l),
-            "pattern": " / ".join(
-                ("[" + ",".join(f"{float(x):.0f}" for x in e) + "]")
-                if isinstance(e, (list, tuple)) else f"{float(e):.0f}"
-                for e in irr_l) + " W/m²",
-            "split": SPLIT_NAME if _in_val(module) else "not in the validation split",
-            "engine": "validated",
-            "created_at": _d.datetime.now().isoformat(timespec="seconds"),
-            "hash": _scenario_hash(module, temp, irr_l)}
-
-
 def _scenario_hash(module, temp, irr) -> str:
     import hashlib
     payload = repr((str(module), round(float(temp), 6), _key(irr)))
     return hashlib.sha1(payload.encode()).hexdigest()[:12]
-
-
-def _set_draft(module, temp, irr, label):
-    st.session_state["scenario_draft"] = _scenario(module, temp, irr, label)
 
 
 def _mirror_scenario(sc: dict) -> None:
@@ -544,22 +508,6 @@ def _dfmt(p, unit):
     return f"{p:g}{unit}"
 
 
-def _dual_sel(key, presets, unit):
-    sel = st.session_state[f"{key}_sel"]
-    if sel != "Custom\u2026":
-        labels = [_dfmt(p, unit) for p in presets]
-        v = float(presets[labels.index(sel)])
-        st.session_state[f"{key}_num"] = v
-        st.session_state[key] = v
-
-
-def _dual_num(key, presets, unit):
-    v = float(st.session_state[f"{key}_num"])
-    st.session_state[key] = v
-    labels = [_dfmt(p, unit) for p in presets]
-    st.session_state[f"{key}_sel"] = labels[presets.index(v)] if v in presets else "Custom\u2026"
-
-
 def _dual(label, key, presets, unit, step, vmin, vmax, default, help=None,
           disabled=False):
     """A single dropdown of presets (the extra editable box was removed per request)."""
@@ -577,410 +525,155 @@ def _dual(label, key, presets, unit, step, vmin, vmax, default, help=None,
     return v
 
 
-def _array_svg(rows, per, shaded_idx, sel_idx, obj_color, c, sel_id=""):
-    lm, gap, pw, ph, top = 66, 12, 96, 62, 22
-    W = lm + per * (pw + gap)
-    H = top + rows * (ph + gap) + 4
-    p = [f'<svg viewBox="0 0 {W} {H}" style="width:100%;height:auto;">',
-         f'<rect x="0" y="0" width="{W}" height="{H}" rx="12" fill="{c["muted_fill"]}"/>']
-    # a soft pole-shadow band across the shaded block
-    if shaded_idx:
-        xs = [lm + (i % per) * (pw + gap) for i in shaded_idx]
-        ys = [top + (i // per) * (ph + gap) for i in shaded_idx]
-        x0, x1 = min(xs) - 6, max(xs) + pw + 6
-        y0, y1 = min(ys) - 4, max(ys) + ph + 4
-        p.append(f'<polygon points="{x0+28:.0f},{y0:.0f} {x1:.0f},{y0:.0f} '
-                 f'{x1-28:.0f},{y1:.0f} {x0:.0f},{y1:.0f}" fill="#2B3238" opacity="0.16"/>')
-    for r in range(rows):
-        y = top + r * (ph + gap)
-        p.append(f'<text x="6" y="{y+ph/2+4:.0f}" font-family="IBM Plex Mono,monospace" '
-                 f'font-size="10" fill="{c["text_muted"]}">STRING {chr(65+r)}</text>')
-        for col in range(per):
-            i = r * per + col
-            x = lm + col * (pw + gap)
-            p.append(f'<rect x="{x}" y="{y}" width="{pw}" height="{ph}" rx="4" fill="{c["panel"]}"/>')
-            p.append(f'<path d="M{x+pw/3:.0f} {y}v{ph}M{x+2*pw/3:.0f} {y}v{ph}'
-                     f'M{x} {y+ph/2:.0f}h{pw}" stroke="#33566B" stroke-width="1"/>')
-            if i in shaded_idx:
-                p.append(f'<rect x="{x}" y="{y}" width="{pw}" height="{ph}" rx="4" '
-                         f'fill="{obj_color}" opacity="0.5"/>')
-            if i == sel_idx:
-                p.append(f'<rect x="{x-2}" y="{y-2}" width="{pw+4}" height="{ph+4}" rx="6" '
-                         f'fill="none" stroke="{c["amber"]}" stroke-width="3"/>')
-                p.append(f'<rect x="{x}" y="{y-17}" width="90" height="16" rx="4" '
-                         f'fill="{c["amber"]}"/>')
-                p.append(f'<text x="{x+6}" y="{y-5}" font-family="IBM Plex Mono,monospace" '
-                         f'font-size="10" fill="#ffffff">{sel_id} selected</text>')
-    p.append('</svg>')
-    return "".join(p)
+# --------------------------------------------------------------------------- #
+# Dynamic test · the timeline runner.
+#
+# The timeline itself — G(t), T(t), Shade(t) on the PV SYSTEM inherited from
+# Scenario, in canonical minutes — lives in gmppt_timeline. This runs ONE
+# dynamic scenario through the trackers exactly the way the EN 50530 harness
+# does: one validated-engine curve per irradiance slice, a DynamicTrajectory
+# over those curves, and the harness's own metrics() on the result. Every
+# figure it produces is scenario-specific and exploratory; none is a benchmark.
+# --------------------------------------------------------------------------- #
+def _dyn_key(dscn: dict) -> str:
+    """A hashable, order-stable cache key: the dynamic-scenario record itself."""
+    import json
+    return json.dumps(dscn, sort_keys=True, default=str)
 
 
-def _daytimeline_svg(c):
-    W, H, lm = 1120, 168, 140
-    x0, x1 = lm, W - 10
-    lanes = [("Inter-row shading", "#AFC9E3", [(0.05, 0.20)]),
-             ("Pole or vent shadow", "#F0C68A", [(0.27, 0.55)]),
-             ("Cloud passes", "#AFC9E3", [(0.80, 0.98)]),
-             ("Soiling", "#E9A08C", [(0.02, 0.98)])]
-    X = lambda f: x0 + f * (x1 - x0)
-    lh, ly0 = 26, 8
-    p = [f"<svg viewBox='0 0 {W} {H}' style='width:100%;height:168px;margin-top:10px'>"]
-    for k, (name, col, blocks) in enumerate(lanes):
-        y = ly0 + k * (lh + 8)
-        p.append(f"<text x='0' y='{y+lh/2+4:.0f}' font-family='IBM Plex Sans,sans-serif' "
-                 f"font-size='11.5' fill='{c['text_muted']}'>{name}</text>")
-        p.append(f"<rect x='{x0}' y='{y}' width='{x1-x0}' height='{lh}' rx='5' "
-                 f"fill='{c['muted_fill']}'/>")
-        for a, b in blocks:
-            p.append(f"<rect x='{X(a):.0f}' y='{y+3}' width='{X(b)-X(a):.0f}' "
-                     f"height='{lh-6}' rx='4' fill='{col}'/>")
-    yp = ly0 + 1 * (lh + 8)
-    p.append(f"<rect x='{X(0.27):.0f}' y='{yp+3}' width='{X(0.55)-X(0.27):.0f}' height='{lh-6}' "
-             f"rx='4' fill='none' stroke='{c['amber']}' stroke-width='2'/>")
-    p.append(f"<text x='{X(0.285):.0f}' y='{yp+lh/2+4:.0f}' font-family='IBM Plex Mono,monospace' "
-             f"font-size='10' fill='#7A5A1E'>selected</text>")
-    ay = ly0 + len(lanes) * (lh + 8) + 4
-    for f, lab in [(0, "06:00"), (0.25, "09:00"), (0.5, "12:00"), (0.75, "15:00"), (1, "18:00")]:
-        p.append(f"<text x='{X(f)-14:.0f}' y='{ay+12}' font-family='IBM Plex Mono,monospace' "
-                 f"font-size='10' fill='{c['text_muted']}'>{lab}</text>")
-    phx = X(0.78)
-    p.append(f"<line x1='{phx:.0f}' y1='4' x2='{phx:.0f}' y2='{ay+2}' stroke='{c['amber']}' "
-             f"stroke-width='1.5'/><circle cx='{phx:.0f}' cy='4' r='5' fill='{c['amber']}'/>")
-    p.append("</svg>")
-    return "".join(p)
+def _to_plain(v):
+    """numpy scalars → Python, so the run dict survives st.cache_data and JSON."""
+    if isinstance(v, (bool, np.bool_)):
+        return bool(v)
+    if isinstance(v, (int, float, np.integer, np.floating)):
+        return float(v)
+    return v
 
 
-def _module_face_svg(irr, base_G, c):
-    W, H = 150, 104
-    sw = (W - 12) / 3.0
-    p = [f'<svg viewBox="0 0 {W} {H}" style="width:150px;height:104px;">',
-         f'<rect x="6" y="6" width="{W-12}" height="{H-24}" fill="{c["panel"]}"/>']
-    for s in range(3):
-        x = 6 + s * sw
-        if s > 0:
-            p.append(f'<line x1="{x:.0f}" y1="6" x2="{x:.0f}" y2="{H-18}" '
-                     f'stroke="#7FA5A8" stroke-width="1.5"/>')
-        entry = irr[s] if s < len(irr) else base_G
-        groups = list(entry) if isinstance(entry, (list, tuple)) else [entry, entry, entry]
-        gh = (H - 24) / len(groups)
-        for gi, gv in enumerate(groups):
-            if gv < base_G - 1:
-                op = 0.62 * (1 - gv / max(base_G, 1)) + 0.15
-                p.append(f'<rect x="{x:.0f}" y="{6 + gi*gh:.0f}" width="{sw:.0f}" '
-                         f'height="{gh:.0f}" fill="#101A20" opacity="{op:.2f}"/>')
-        p.append(f'<text x="{x + sw/2 - 6:.0f}" y="{H-4}" font-family="IBM Plex Mono,monospace" '
-                 f'font-size="10" fill="{c["text_muted"]}">S{s+1}</text>')
-    p.append('</svg>')
-    return "".join(p)
+@st.cache_data(show_spinner="Running your timeline through the trackers…")
+def _timeline_run(dkey: str) -> dict:
+    import json
+    from gmppt import dynamic as dyn, tracking as trk, trackers as trkx, pso, config as gc, device
+    from gmppt.tracking import REACH_TOLERANCE
+    dscn = json.loads(dkey)
+    system, events = dscn["system"], dscn["events"]
+    peak = float(dscn["sun"]["peak_Wm2"])
+    t_dawn = float(dscn["temperature"]["dawn_C"])
+    t_noon = float(dscn["temperature"]["noon_C"])
+    tracked = dscn["tracked_panel"]["uid"]
+    slices = int(dscn["slices"])
+    SPS = int(dscn.get("steps_per_slice", tl.STEPS_PER_SLICE))
+    n_sub = int(_gcfg.N_SUBSTRINGS)
+    mp = _mparams(dscn["module"])
+    times = tl.sample_times(slices)
 
-
-# --- event-based day: model + runner (functional; drag replaced by timing sliders) ---
-# The drifting shadow is one substring wide and crosses the module once per event
-# window. Declaring the width here fixes the sweep rate: over `slices` samples no
-# substring's coverage can change by more than (n_sub + DRIFT_WIDTH)/slices of
-# its own width per slice.
-DRIFT_WIDTH = 1.0
-
-
-def _day_event_state(events, time_hour, base_G, n_sub=3):
-    """Convert the configured day events into one instantaneous substring state.
-
-    This is the bridge between the temporal event editor and the static scenario
-    representation used by the simulator/scenario workflow. It does not replace
-    either engine; it only produces the same per-substring irradiance description
-    at a selected instant.
-    """
-    time_hour = float(time_hour)
-    base_G = float(base_G)
-    frac_day = (time_hour - 6.0) / 12.0
-    sun_G = base_G * float(np.clip(np.sin(np.pi * frac_day), 0.0, None))
-    sun_G = max(1.0, sun_G)
-    irr = [sun_G] * int(n_sub)
-    active = []
-
-    for ev in events:
-        t0 = float(ev.get("t0", 0.0))
-        t1 = float(ev.get("t1", 1.0))
-        if not (t0 <= frac_day <= t1):
-            continue
-        kind = str(ev.get("kind", "Pole or vent"))
-        sub, depth = _KIND_MAP.get(kind, (1, 0.4))
-        f = float(np.clip((frac_day - t0) / max(t1 - t0, 1e-9), 0.0, 1.0))
-        motion = ev.get("motion", "fixed in place")
-        if motion == "grows through the event":
-            depth = 1.0 - (1.0 - float(depth)) * f
-        elif motion == "drifts across the strips" and sub != "all":
-            # A continuous edge sweep, not a jump between strips. The shadow is
-            # DRIFT_WIDTH substrings wide and its leading edge crosses the module
-            # once per event window, so each substring's irradiance ramps in
-            # proportion to how much of it the shadow covers. The previous
-            # int(f * n_sub) snapped the whole shadow from one strip to the next
-            # between slices, which is a teleport no sun makes. (R17)
-            lead = f * (int(n_sub) + DRIFT_WIDTH) - DRIFT_WIDTH
-            for s in range(int(n_sub)):
-                cover = max(0.0, min(s + 1.0, lead + DRIFT_WIDTH) - max(float(s), lead))
-                if cover > 0.0:
-                    irr[s] = min(irr[s], sun_G * (1.0 - cover * (1.0 - float(depth))))
-            active.append(kind)
-            continue
-
-        if sub == "all":
-            irr = [min(x, sun_G * float(depth)) for x in irr]
-        else:
-            sub = int(np.clip(sub, 0, int(n_sub) - 1))
-            irr[sub] = min(irr[sub], sun_G * float(depth))
-        active.append(kind)
-
-    return [float(max(1.0, x)) for x in irr], sun_G, active
-
-
-def _day_sample_scenarios(events, base_G, temp, module, step_minutes=15):
-    """Sample active day-event states into static scenario records.
-
-    The records are intentionally engine-neutral recipes: the event timeline
-    supplies time/irradiance/shading state, while the interactive Simulator
-    supplies its own datasheet module. No validated CEC module is silently
-    converted into a different datasheet model.
-    """
-    if not events:
-        return []
-    step = max(5, int(step_minutes))
-    start = min(18.0, max(6.0, min(6.0 + float(e.get("t0", 0))*12 for e in events)))
-    end = max(6.0, min(18.0, max(6.0 + float(e.get("t1", 1))*12 for e in events)))
-    times = np.arange(start, end + 1e-9, step / 60.0)
-    out = []
-    for h in times:
-        irr, sun_G, active = _day_event_state(events, float(h), base_G, _gcfg.N_SUBSTRINGS)
-        if not active:
-            continue
-        # Which events were live at this instant, with enough of each to
-        # reconstruct why the irradiance looks the way it does. `active` is only
-        # a list of kind names, which cannot tell two poles apart. (U4)
-        live = []
-        for ev in events:
-            if str(ev.get("kind")) not in active:
-                continue
-            h0, h1 = 6.0 + float(ev.get("t0", 0)) * 12, 6.0 + float(ev.get("t1", 1)) * 12
-            if not (h0 <= float(h) <= h1):
-                continue
-            live.append({"kind": str(ev.get("kind")), "uid": ev.get("uid"),
-                         "start_hour": round(h0, 2), "end_hour": round(h1, 2),
-                         "duration_hours": round(h1 - h0, 2),
-                         "motion": ev.get("motion", "fixed in place")})
-        out.append({
-            "source": "Explore · day-event timeline",
-            "time_hour": round(float(h), 2),
-            "time_label": f"{int(h):02d}:{int(round((h % 1) * 60)) % 60:02d}",
-            # module_source is the CEC module the events were designed on;
-            # module_applied is the Sandbox datasheet that will actually draw the
-            # curve. They are different engines and the record says so. (U4)
-            "module_source": str(module),
-            "module_applied": str(st.session_state.get("bench_preset", "—")),
-            "temperature_C": float(temp),
-            "base_irradiance_Wm2": float(sun_G),
-            "substring_irradiance_Wm2": irr,
-            "active_events": active,
-            "events": live,
-            "scenario_hash": _scenario_hash(module, temp, irr),
-        })
-    return out
-
-
-# kind -> (target substring index or "all", light left as a fraction of the sun level)
-_KIND_MAP = {
-    "Row in front": (0, 0.35), "Building edge": (0, 0.40),
-    "Pole or vent": (1, 0.28), "Tree branch": (1, 0.45), "Snow band": ("all", 0.55),
-    "Paint your own": (1, 0.40),
-    "Cloud": ("all", 0.55),
-    "Soiling": ("all", 0.80), "Bird dropping": (2, 0.20), "Leaf": (2, 0.30),
-}
-_KIND_LANE = {"Row in front": 0, "Building edge": 0,
-              "Pole or vent": 1, "Tree branch": 1, "Snow band": 1, "Paint your own": 1,
-              "Cloud": 2, "Soiling": 3, "Bird dropping": 3, "Leaf": 3}
-_DAY_LANES = ["Inter-row shading", "Pole or vent shadow", "Cloud passes", "Soiling"]
-_DAY_COL = {0: "#AFC9E3", 1: "#F0C68A", 2: "#AFC9E3", 3: "#E9A08C"}
-
-
-_DAY_MOTIONS = ["fixed in place", "drifts across the strips", "grows through the event"]
-
-
-def _day_motions_for(kind):
-    """Whole-module events (cloud, soiling, snow) have no single strip to drift across."""
-    sub = _KIND_MAP.get(kind, (1, 0.4))[0]
-    return [m for m in _DAY_MOTIONS if not (sub == "all" and m.startswith("drifts"))]
-
-
-def _day_window_from_hour(hour, duration=1.5):
-    """Return a normalized 06:00–18:00 event window starting at `hour`."""
-    hour = float(np.clip(hour, 6.0, 18.0))
-    duration = float(max(0.25, duration))
-    end = min(18.0, hour + duration)
-    start = hour
-    # Keep the default duration when the playhead is near 18:00 by shifting left.
-    if end - start < duration:
-        start = max(6.0, end - duration)
-    return (start - 6.0) / 12.0, (end - 6.0) / 12.0
-
-
-def _day_uid() -> str:
-    from uuid import uuid4
-    return uuid4().hex[:8]
-
-
-def _day_migrate(events):
-    """Give every event a stable id.
-
-    Widgets used to be keyed by list position, so deleting an event shifted every
-    later event's window and motion onto its neighbour. Keys follow the event
-    now, not its index. (R4)
-    """
-    for ev in events or []:
-        if not ev.get("uid"):
-            ev["uid"] = _day_uid()
-    return events
-
-
-def _day_drop(uid):
-    """Remove one event and the widget state that belonged to it."""
-    events = st.session_state.get("day_events") or []
-    st.session_state["day_events"] = [e for e in events if e.get("uid") != uid]
-    for k in (f"day_win_{uid}", f"day_mot_{uid}"):
-        st.session_state.pop(k, None)
-    st.session_state.pop("day_scenario_samples", None)   # derived from the events
-    st.session_state.pop("day_ran", None)
-
-
-def _day_add(kind):
-    """Add an event at the current timeline playhead instead of a hard-coded slot."""
-    st.session_state.setdefault("day_events", [])
-    hour = float(st.session_state.get("day_time", 15.0))
-    t0, t1 = _day_window_from_hour(hour, duration=1.5)
-    events = st.session_state["day_events"]
-    events.append({
-        "kind": kind,
-        "t0": t0,
-        "t1": t1,
-        "motion": "fixed in place",
-        "created_at_hour": hour,
-        "uid": _day_uid(),
-    })
-    st.session_state.pop("day_scenario_samples", None)
-    st.session_state.pop("day_ran", None)
-
-
-def _day_timeline_svg(events, playhead, c):
-    W, H, lm = 1120, 168, 140
-    x0, x1 = lm, W - 10
-    X = lambda f: x0 + f * (x1 - x0)
-    lh, ly0 = 26, 8
-    p = [f"<svg viewBox='0 0 {W} {H}' style='width:100%;height:168px;margin-top:8px'>"]
-    for k, name in enumerate(_DAY_LANES):
-        y = ly0 + k * (lh + 8)
-        p.append(f"<text x='0' y='{y+lh/2+4:.0f}' font-family='IBM Plex Sans,sans-serif' "
-                 f"font-size='11.5' fill='{c['text_muted']}'>{name}</text>")
-        p.append(f"<rect x='{x0}' y='{y}' width='{x1-x0}' height='{lh}' rx='5' "
-                 f"fill='{c['muted_fill']}'/>")
-    for ev in events:
-        lane = _KIND_LANE.get(ev["kind"], 1)
-        y = ly0 + lane * (lh + 8)
-        a, b = X(max(0, ev["t0"])), X(min(1, ev["t1"]))
-        p.append(f"<rect x='{a:.0f}' y='{y+3}' width='{max(6,b-a):.0f}' height='{lh-6}' rx='4' "
-                 f"fill='{_DAY_COL[lane]}'/>")
-        p.append(f"<text x='{a+6:.0f}' y='{y+lh/2+4:.0f}' font-family='IBM Plex Mono,monospace' "
-                 f"font-size='10' fill='#2B2A20'>{ev['kind']}</text>")
-    ay = ly0 + len(_DAY_LANES) * (lh + 8) + 4
-    for f, lab in [(0, "06:00"), (0.25, "09:00"), (0.5, "12:00"), (0.75, "15:00"), (1, "18:00")]:
-        p.append(f"<text x='{X(f)-14:.0f}' y='{ay+12}' font-family='IBM Plex Mono,monospace' "
-                 f"font-size='10' fill='{c['text_muted']}'>{lab}</text>")
-    phx = X(max(0, min(1, playhead)))
-    p.append(f"<line x1='{phx:.0f}' y1='4' x2='{phx:.0f}' y2='{ay+2}' stroke='{c['amber']}' "
-             f"stroke-width='1.5'/><circle cx='{phx:.0f}' cy='4' r='5' fill='{c['amber']}'/>")
-    p.append("</svg>")
-    return "".join(p)
-
-
-@st.cache_data(show_spinner="Running your day through the trackers…")
-def _day_run(module, temp, base_G, events_key):
-    import numpy as np
-    from gmppt import dynamic as dyn, tracking as trk, pso, config as gc, device
-    from gmppt.device import ModuleParams
-    mp = ModuleParams.from_cec(module)
-    slices, SPS = 48, 8
-    times = np.linspace(6.0, 18.0, slices)
-    sun = float(base_G) * np.clip(np.sin(np.pi * (times - 6) / 12), 0, None)
-
-    def curve_at(irr):
-        c = device.module_iv(mp, irr, float(temp), bd=gc.breakdown())
-        a = device.analyse(c)
-        V = np.asarray(c["V"], float); P = np.asarray(c["P"], float)
+    def curve_at(entry, T):
+        cv = device.module_iv(mp, entry, float(T), bd=gc.breakdown())
+        a = device.analyse(cv)
+        V = np.asarray(cv["V"], float); P = np.asarray(cv["P"], float)
         o = np.argsort(V)
-        return (V[o], P[o], float(a["gmpp"]["V"]), float(a["gmpp"]["P"]))
+        return (V[o], P[o], float(a["gmpp"]["V"]), float(a["gmpp"]["P"]), int(a["n_peaks"]))
 
-    curves, unshaded = [], []
-    events = [{"kind": k, "t0": t0, "t1": t1, "motion": motion}
-              for k, t0, t1, motion in events_key]
-    # G2, the curve-integrity gate transition.py applies: the power the curve
-    # reports at v_gmpp must reproduce p_gmpp. A slice that fails it is a curve
-    # the trackers would be stepping through incorrectly, so the count is
-    # reported rather than assumed.
-    g2_pass, g2_total, worst_rel = 0, 0, 0.0
-    # A5 plays these slices back, so each one's curve and its own G2 verdict are
-    # RECORDED here rather than recomputed by the animation. Nothing about the
-    # run changes: the same curves, the same gate, the same counts. (§11)
-    slice_curves, slice_g2 = [], []
-    for ti, g in zip(times, sun):
-        irr, _, _ = _day_event_state(events, float(ti), float(base_G), 3)
-        cur = curve_at(irr)
-        V, Pp, v_g, p_g = cur
+    curves, unshaded, slice_curves, slice_g2, slice_env = [], [], [], [], []
+    g2_pass, worst_rel = 0, 0.0
+    for ti in times:
+        stt = tl.state_at(system, events, float(ti), peak, t_dawn, t_noon, n_sub)
+        entry = tl.entry_for(stt, system, tracked)
+        V, Pp, v_g, p_g, n_pk = curve_at(entry, stt["temp_c"])
+        # G2, the curve-integrity gate the harness applies: the curve must
+        # reproduce its own GMPP. A failing slice is counted, never dropped.
         rel = abs(float(np.interp(v_g, V, Pp)) - p_g) / max(p_g, 1e-9)
-        g2_total += 1
-        g2_pass += int(rel <= 1e-3)
+        ok = rel <= trk.PARITY_TOL
+        g2_pass += int(ok)
         worst_rel = max(worst_rel, rel)
-        curves.append(cur)
-        unshaded.append(curve_at([max(1.0, float(g))] * 3)[3])
+        curves.append((V, Pp, v_g, p_g))
+        unshaded.append(curve_at([max(1.0, stt["sun_G"])] * n_sub, stt["temp_c"])[3])
         keep = np.linspace(0, len(V) - 1, min(len(V), 200)).astype(int)
-        slice_curves.append({"t": float(ti),
+        slice_curves.append({"t": int(round(float(ti))),
                              "V": [float(x) for x in V[keep]],
                              "P": [float(x) for x in Pp[keep]],
                              "gmpp": {"V": float(v_g), "P": float(p_g)},
-                             "irr": [list(e) if isinstance(e, (list, tuple))
-                                     else float(e) for e in irr]})
-        slice_g2.append({"pass": bool(rel <= 1e-3), "rel": float(rel)})
+                             "irr": entry, "n_peaks": int(n_pk)})
+        slice_g2.append({"pass": bool(ok), "rel": float(rel)})
+        slice_env.append({"t": int(round(float(ti))), "sun_G": float(stt["sun_G"]),
+                          "temp_c": float(stt["temp_c"]), "active": list(stt["active"]),
+                          "shaded_uids": sorted(stt["shaded_uids"]), "entry": entry})
 
-    bs = np.array([SPS] * slices); scored = np.ones(slices, bool)
-    mk = lambda: dyn.DynamicTrajectory(curves=curves, block_steps=bs, scored=scored,
-                                       module=module)
+    bs = np.array([SPS] * slices)
+    scored = np.ones(slices, bool)
+    n_steps = int(bs.sum())
+
+    def mk():
+        return dyn.DynamicTrajectory(curves=curves, block_steps=bs, scored=scored,
+                                     module=str(dscn["module"]), profile_name="timeline")
+
     out = {"t": [float(x) for x in np.repeat(times, SPS)],
-           "unshaded": [float(x) for x in np.repeat(unshaded, SPS)], "methods": {}}
-
-    out["v_hist"] = {}
+           "unshaded": [float(x) for x in np.repeat(unshaded, SPS)],
+           "methods": {}, "v_hist": {}, "metrics": {}, "avail": []}
 
     def run(name, fn, **kw):
-        tj = mk(); fn(tj, n_steps=int(bs.sum()), **kw)
+        tj = mk()
+        fn(tj, n_steps=n_steps, **kw)
         out["methods"][name] = [float(x) for x in tj.p_hist]
-        out["v_hist"][name] = [float(x) for x in tj.v_hist]   # A6 plays these back
+        out["v_hist"][name] = [float(x) for x in tj.v_hist]
         out["avail"] = [float(x) for x in tj.avail_hist]
+        out["metrics"][name] = {k: _to_plain(v) for k, v in tj.metrics().items()}
 
     run("P&O", trk.perturb_and_observe)
+    run("InC", trkx.incremental_conductance)
     run("PSO", pso.particle_swarm)
     model = _c3_model()
+    seed_temp = float(slice_env[0]["temp_c"])
     if model is not None:
         from gmppt import hybrid as hyb
-        run("Hybrid (bounded)", hyb.make_hybrid(model), temp_c=float(temp))
-    av = np.array(out["avail"])
-    out["energy"] = {m: 100 * float(np.sum(ph)) / max(1e-9, float(np.sum(av)))
+        # The seed reads ONE module temperature (hybrid.seed_voltage's contract);
+        # in a run that starts at dawn it is the dawn cell temperature.
+        run("Hybrid (bounded)", hyb.make_hybrid(model), temp_c=seed_temp)
+        run("Model only", hyb.make_seed_only(model), temp_c=seed_temp)
+
+    av = np.asarray(out["avail"], float)
+    minutes_per_step = tl.DAY_MINUTES / max(1, n_steps)
+    out["energy"] = {m: 100.0 * float(np.sum(ph)) / max(1e-9, float(np.sum(av)))
                      for m, ph in out["methods"].items()}
-    out["has_model"] = model is not None
-    out["g2"] = {"passed": int(g2_pass), "total": int(g2_total),
-                 "worst_rel": float(worst_rel), "tol": 1e-3}
-    out["slice_curves"] = slice_curves
-    out["slice_g2"] = slice_g2            # a failed slice is kept, never dropped
-    out["slices"] = int(slices)
-    out["steps_per_slice"] = int(SPS)
+    out["energy_wh"] = {m: tl.energy_wh(ph, minutes_per_step) for m, ph in out["methods"].items()}
+    out["available_wh"] = tl.energy_wh(av, minutes_per_step)
+    out["unshaded_wh"] = tl.energy_wh(out["unshaded"], minutes_per_step)
+
+    # Condition changes (an event starting or ending) and, per method, how many
+    # steps it took to settle again — the harness's convergence rule applied to
+    # each segment between changes. Read from the events, never assumed.
+    changes = tl.change_points(events, times)
+    for ch in changes:
+        ch["step"] = int(ch["slice"]) * SPS
+    bounds = [ch["step"] for ch in changes] + [n_steps]
+    out["reconv"] = {}
+    for m, ph in out["methods"].items():
+        rows = []
+        for i, ch in enumerate(changes):
+            rows.append({"t": ch["t"], "step": ch["step"],
+                         "steps": tl.reconvergence_steps(ph, av, ch["step"], bounds[i + 1],
+                                                         REACH_TOLERANCE)})
+        out["reconv"][m] = rows
+
+    out.update(has_model=model is not None, seed_temp_c=seed_temp,
+               g2={"passed": int(g2_pass), "total": int(slices),
+                   "worst_rel": float(worst_rel), "tol": float(trk.PARITY_TOL)},
+               slice_curves=slice_curves, slice_g2=slice_g2, slice_env=slice_env,
+               slices=int(slices), steps_per_slice=int(SPS), n_steps=int(n_steps),
+               minutes_per_step=float(minutes_per_step), changes=changes,
+               tolerance=float(REACH_TOLERANCE), tracked=dict(dscn["tracked_panel"]),
+               hash=str(dscn["hash"]), module=str(dscn["module"]))
     return out
 
 
-def _unseen_check(name):
+def _run_step_at(run: dict, t_minutes) -> int:
+    """The control step the playhead is on."""
+    n = int(run.get("n_steps") or len(run["t"]))
+    f = (float(t_minutes) - tl.DAY_START) / tl.DAY_MINUTES
+    return int(min(max(round(f * (n - 1)), 0), n - 1))
+
+
+def _unseen_check(name, chip=True):
     """What kind of data this panel is, in one line — detail on request. (U1.5, §10)
 
     This used to print the split counts, the nearest training module and an
@@ -989,12 +682,19 @@ def _unseen_check(name):
     in order to understand the panel in front of them. The one fact that matters
     stays visible; the rest moved into Technical details, where it is still
     available for reproducibility.
+
+    chip=False keeps only the guard: the membership check still runs and a
+    training module still stops the page, but nothing is printed for a
+    validation module. Scenario uses this — the data class is not something
+    a reader building a system needs to see beside the panel picker.
     """
     in_train = str(name) in _train_module_names()
     if in_train:
         # This would invalidate the page, so it is a warning, not a detail.
         ui.callout("This panel is not validation data, so its curve cannot be "
                    "compared with the benchmark results.", "Wrong data set", "limit")
+        return
+    if not chip:
         return
     ui.data_chip("Validation data",
                  "Used to compare tracking methods. Held-out test data is not shown.")
@@ -1013,405 +713,496 @@ def _unseen_check(name):
             f"the split function.")
 
 
+def _key_rows(rows):
+    """Hashable key for [row][module] irradiances (each module entry through _key)."""
+    return tuple(tuple(_key(entry) for entry in row) for row in rows)
+
+
+def _unkey_entry(entry_key):
+    return [list(e) if isinstance(e, tuple) else float(e) for e in entry_key]
+
+
+def _pack_curve(c):
+    """analyse() + the V>=0, V-ascending arrays every chart here draws."""
+    a = _eng.analyse(c)
+    V, I, P = c["V"], c["I"], c["P"]
+    m = V >= 0
+    V, I, P = V[m], I[m], P[m]
+    o = np.argsort(V)
+    return dict(V=V[o], I=I[o], P=P[o], gmpp=a["gmpp"], peaks=a["peaks"],
+                n_peaks=a["n_peaks"], voc=float(V.max()))
+
+
+@st.cache_data(show_spinner=False)
+def _sim_string(name, row_key, T):
+    """One row of panels in series — the validated string_iv, never a copy of it.
+    Cache key: module, temperature, the ordered module irradiances (n_series is
+    their count)."""
+    mp = _mparams(name)
+    irr = [_unkey_entry(e) for e in row_key]
+    return _pack_curve(_eng.string_iv(mp, irr, float(T), bd=_gcfg.breakdown()))
+
+
+@st.cache_data(show_spinner=False)
+def _sim_array(name, rows_key, T, blocking=True):
+    """Every row in parallel — device.array_iv (the one additive engine function).
+    Cache key: module, temperature, every string's irradiances (n_series and
+    n_parallel are their shape), blocking-diode configuration."""
+    mp = _mparams(name)
+    strings = [[_unkey_entry(e) for e in row] for row in rows_key]
+    return _pack_curve(_eng.array_iv(mp, strings, float(T), bd=_gcfg.breakdown(),
+                                     blocking_diodes=bool(blocking)))
+
+
+def _topo_click_to_selection():
+    """A click on the topology drawing (delivered by Plotly on the run after the
+    click) selects that panel. Runs before any widget is created, because a
+    widget's key may only be set before the widget exists. Selection is VIEW
+    STATE: it changes which panel is shown, and nothing else."""
+    ev = st.session_state.get("gm_topo")
+    try:
+        pts = ev["selection"]["points"]
+    except (TypeError, KeyError):
+        return
+    if not pts:
+        return
+    uid = pts[0].get("customdata")
+    if isinstance(uid, (list, tuple)):
+        uid = uid[0] if uid else None
+    if not uid or uid == st.session_state.get("gm_topo_seen"):
+        return
+    st.session_state["gm_topo_seen"] = uid
+    for p in (st.session_state.get("scenario_system") or {}).get("panels", []):
+        if p["uid"] == uid:
+            st.session_state["gm_sel"] = p["display_id"]
+            return
+
+
+def _clear_shadow_keys(uids):
+    """on_click: reset the shading widgets of these panels to 'no shadow'."""
+    for uid in uids:
+        st.session_state[f"shp_{uid}"] = "None"
+        st.session_state[f"drk_{uid}"] = int(scn.DEFAULT_SHADOW["darkness"])
+        st.session_state[f"pos_{uid}"] = 50
+
+
 def page_panels():
     _demo_startup_log()
-    ui.page_intro("Your panels",
-                  "Put a shadow on a panel and see what it does to the power it can make.",
-                  "Understand · The panels")
     c = ui.T()
+    disp, mono = ui.FONTS["display"], ui.FONTS["mono"]
+    st.markdown(f"<style>.bh{{font-family:{disp};font-weight:700;color:{c['text']};font-size:15px;}}"
+                f".bmono,.bmono *{{font-family:{mono};}}"
+                f".gm-status{{font-family:{mono};font-size:12.5px;margin:6px 0;}}"
+                f".gm-badges{{display:flex;flex-direction:column;gap:6px;font-family:{mono};"
+                f"font-size:12.5px;}} .gm-badges span{{display:flex;justify-content:space-between;}}"
+                f"</style>", unsafe_allow_html=True)
+    ui.page_intro("Build system",
+                  "Build the PV system once, then define what is happening to it right now.",
+                  "Scenario · Build system")
+    # T13: the engine or its module pool missing is an explicit stop. Nothing
+    # from the sandbox and no example module ever stands in for it.
     try:
         val_mods = _validation_modules()
         assert val_mods
     except Exception as e:
-        ui.callout(f"Could not load the validation-module pool ({e}). Make sure the "
-                   "`gmppt/` package and `results/cec_pool.parquet` sit beside "
-                   "`gmppt_app.py`.", "Engine not connected", "limit")
+        ui.unavailable("The validated engine is not connected",
+                       "No panel data could be loaded, so nothing on this page can be drawn. "
+                       "No example or sandbox result is shown in its place.",
+                       f"- `{type(e).__name__}: {_e(e)}`\n- Needs `results/cec_pool.parquet` "
+                       f"beside `gmppt_app.py` (produced once by Phase 1).", kind="limit")
         return
     # Nothing is drawn unless every module offered is a validation module. (U1.3)
     if not assert_val_modules([n for _, n in val_mods], "The panel dropdown"):
         return
-
     label_to_name = dict(val_mods)
+    _topo_click_to_selection()
+
+    hdr = st.columns([5, 1.1], vertical_alignment="center")
+    with hdr[1]:
+        lab = bool(st.toggle("Lab details", key="gm_lab",
+                             help="Section and cell-group labels, internal ids, hashes and "
+                                  "the technical names. View only — it changes nothing."))
     ctrl, mid, right = st.columns([0.92, 1.5, 1.18], gap="large")
 
-    # ------------------------------------------------------------------ controls
+    # ================================================================ 1 · system
+    # PV SYSTEM: persistent hardware / topology. Built once here; the static
+    # test freezes one snapshot of it and the future dynamic timeline will
+    # inherit it unchanged (module, n_series, n_parallel, panel uids,
+    # connections, optimiser architecture) while G, T and shading vary.
     with ctrl:
-        with st.expander("1 · The panel", expanded=True):
+        # Collapsed-card summaries come from the live session values, never
+        # from a second copy of the state. The open/closed flags are view state.
+        _pp = int(round(float(st.session_state.get("gm_per", 1) or 1)))
+        _rr = int(round(float(st.session_state.get("gm_rows", 1) or 1)))
+        _model = str(st.session_state.get("gm_panel") or val_mods[0][0]).split(" · ")[0]
+        with ui.collapsible("1 · Your PV system", "scenario_system_expanded",
+                            summary=f"{_pp * _rr} panel{'s' if _pp * _rr != 1 else ''} · {_model}"):
             labels = [l for l, _ in val_mods] + ["Nanum target panel — [awaiting spec]"]
-            pick = st.selectbox("Panel model (validation set)", labels, key="gm_panel")
+            pick = st.selectbox("Panel type", labels, key="gm_panel")
             awaiting = pick.startswith("Nanum")
             name = val_mods[0][1] if awaiting else label_to_name[pick]
             if awaiting:
                 ui.callout("Nanum's target spec is awaited — a validation module is "
                            "shown in the meantime.", "", "info")
-            _unseen_check(name)
-            rows = int(_dual("Rows of panels", "gm_rows", [1, 2, 3, 4, 6], "", 1, 1, 6, 3))
-            per = int(_dual("Panels per row", "gm_per", [1, 2, 3, 4, 5, 6, 8], "", 1, 1, 8, 5))
-            # once the key is in session state (persist_widget_state keeps it
-            # alive across pages) a default would be a second source of truth,
-            # which Streamlit warns about on every run
-            mount = st.segmented_control(
-                "Mounting", ["Portrait", "Landscape"],
-                default=None if "gm_mount" in st.session_state else "Portrait",
-                key="gm_mount") or "Portrait"
-            st.caption("Orientation decides what a shadow does: across the cell "
-                       "strips, or along them.")
-        n_panels = rows * per
-        ids = [f"{chr(65 + i // per)}-{i % per + 1:02d}" for i in range(n_panels)]
-
-        with st.expander("2 · The shadow", expanded=True):
-            objs = ["Pole or vent", "Row in front", "Tree branch", "Cloud",
-                    "Soiling", "Bird dropping", "Leaf"]
-            obj = st.selectbox("What casts it", objs, key="gm_obj2")
-            # Cloud and soiling are modelled as a graded blanket over the whole
-            # module, so _event_pattern ignores Width and Runs for them. Disabling
-            # the two controls says so instead of letting them look live.
-            covers_all = obj in ("Cloud", "Soiling")
-            depth = _dual("How dark the shadow is", "gm_depth2",
-                          [0, 100, 200, 240, 300, 400, 600, 900], " W/m²", 10, 0, 900, 240,
-                          help="Irradiance left under the shadow. Lower = darker.")
-            width = _dual("How wide the shadow is", "gm_width",
-                          [0.25, 0.4, 0.5, 0.55, 0.75, 1.0], "", 0.05, 0.0, 1.0, 0.55,
-                          help=("Unavailable for cloud and soiling: those cover the whole "
-                                "module, so there is no width to set." if covers_all
-                                else None),
-                          disabled=covers_all)
-            rc1, rc2 = st.columns(2)
-            default_runs = 0 if mount == "Portrait" else 1
-            runs = rc1.selectbox("Runs", ["across the strips", "along the strips",
-                                          "diagonally"], index=default_runs, key="gm_runs",
-                                 disabled=covers_all,
-                                 help="Unavailable for cloud and soiling: those cover the "
-                                      "whole module as a graded blanket, so direction has "
-                                      "nothing to run along." if covers_all else None)
-            edge = rc2.selectbox("Edge", ["hard", "soft (penumbra)", "dappled"], key="gm_edge")
-            if covers_all:
-                shaded_ids = list(ids)
-                st.caption("Cloud and soiling cover the whole array, and are graded across "
-                           "the module rather than following a direction.")
+            _unseen_check(name, chip=False)      # the guard only; no data-class chip here
+            # Topology, as integers. Older sessions carry floats from the preset
+            # dropdowns these controls replaced; they are kept, not reset.
+            for _k in ("gm_per", "gm_rows"):
+                try:
+                    st.session_state[_k] = int(min(12, max(1, round(float(
+                        st.session_state.get(_k, 1))))))
+                except (TypeError, ValueError):
+                    st.session_state[_k] = 1
+            n_series = int(st.number_input("Panels in a row", 1, 12, step=1, key="gm_per",
+                                           help="Panels wired one after another in a row."))
+            n_parallel = int(st.number_input("Rows", 1, 12, step=1, key="gm_rows",
+                                             help="Rows joined side by side on the DC bus."))
+            n_panels = n_series * n_parallel
+            if n_panels > 1:
+                st.session_state.setdefault("gm_opt", True)
+                optimisers = bool(st.checkbox("Every panel has its own optimiser", key="gm_opt",
+                                              help="On: each panel is tracked on its own (the "
+                                                   "product's architecture). Off: one shared "
+                                                   "tracker on the whole array."))
             else:
-                if "gm_shaded_ids" not in st.session_state:
-                    s0 = max(0, (n_panels - min(3, n_panels)) // 2)
-                    st.session_state["gm_shaded_ids"] = ids[s0:s0 + min(3, n_panels)]
-                st.session_state["gm_shaded_ids"] = [i for i in
-                    st.session_state["gm_shaded_ids"] if i in ids] or ids[:min(3, n_panels)]
-                shaded_ids = st.multiselect("Shade which panels", ids, key="gm_shaded_ids",
-                                            help="Pick exactly which panels the shadow covers.")
-            n_shaded = len(shaded_ids)
-            st.caption("These controls set one single moment. How the shadow moves "
-                       "through the day is set on the day timeline below.")
+                optimisers = bool(st.session_state.get("gm_opt", True))
+            st.markdown(f"<div class='gm-status'>{n_panels} panel{'s' if n_panels != 1 else ''}"
+                        + (f" · {n_series}S × {n_parallel}P · {n_panels} module"
+                           f"{'s' if n_panels != 1 else ''} · {_gcfg.N_SUBSTRINGS} substrings/module"
+                           if lab else "") + "</div>", unsafe_allow_html=True)
 
-        with st.expander("3 · Conditions", expanded=False):
+        prev_sys = st.session_state.get("scenario_system") or {}
+        panels = scn.migrate_panels(prev_sys.get("panels"), n_series, n_parallel)
+        system = {"module": str(name), "n_series": n_series, "n_parallel": n_parallel,
+                  "optimisers_enabled": optimisers, "blocking_diodes": True,
+                  "panels": panels}
+        st.session_state["scenario_system"] = system
+        ids = [p["display_id"] for p in panels]
+        by_id = {p["display_id"]: p for p in panels}
+        # selection is VIEW STATE (which panel is shown); resolved before the
+        # shading card because that card edits the selected panel's shadow
+        if st.session_state.get("gm_sel") not in ids:
+            st.session_state["gm_sel"] = ids[0]
+        sel = by_id[st.session_state["gm_sel"]]
+        sel_id = sel["display_id"]
+
+        # ============================================================ 2 · conditions
+        # STATIC CONDITION: one environmental snapshot. Time is minutes after
+        # midnight (15:00 = 900) and is metadata today — it anchors the future
+        # timeline; it does not enter the physics.
+        st.session_state.setdefault("gm_time", scn.minutes_to_time(900))
+        _cond = (f"{scn.minutes_to_hhmm(scn.time_to_minutes(st.session_state['gm_time']))} · "
+                 f"{float(st.session_state.get('gm_G2', 910)):.0f} W/m² · "
+                 f"{float(st.session_state.get('gm_T2', 43)):.0f} °C")
+        with ui.collapsible("2 · Conditions", "scenario_conditions_expanded", summary=_cond):
+            t_val = st.time_input("Time", key="gm_time", step=900,
+                                  help="The moment this snapshot describes. It anchors a "
+                                       "future timeline; it does not change the physics.")
+            time_minutes = scn.time_to_minutes(t_val)
             base_G = int(_dual("Sunlight (W/m²)", "gm_G2",
-                               [200, 400, 600, 800, 910, 1000, 1100], " W/m²", 10, 200, 1100, 910))
+                               [100, 200, 400, 600, 800, 910, 1000], " W/m²", 10, 100, 1000, 910))
             T = int(_dual("Cell temperature (°C)", "gm_T2",
                           [10, 25, 43, 55, 70], " °C", 1, 10, 70, 43,
                           help="Cell (not air) temperature."))
-        # No Run button here: the page is reactive and recomputes on every control
-        # change, so a button would only ever redraw what is already correct.
-        if st.button("Reset shadow", key="gm_reset_shadow", use_container_width=True,
-                     help="Restores the shadow controls to their defaults. The module, "
-                          "the array size and the conditions are left alone."):
-            for _k in ("gm_obj2", "gm_depth2", "gm_width", "gm_runs", "gm_edge",
-                       "gm_shaded_ids"):
-                st.session_state.pop(_k, None)
-            st.toast("Shadow controls reset — module and conditions kept.")
-            st.rerun()
 
-    # ------------------------------------------------------------------ compute
-    pattern = _event_pattern(obj, depth, width, runs, edge, base_G)
+        # ============================================================ 3 · shading
+        # Per panel: the widgets are keyed by the panel's uid, so each panel
+        # keeps its own shadow and nothing has to be copied when the selection
+        # changes. The panel record is the state; the widgets edit it.
+        # summary from the live widget values (current on every run), falling
+        # back to the panel record for panels never edited
+        _shaded = []
+        for _p in panels:
+            _shape = st.session_state.get(f"shp_{_p['uid']}", (_p.get("shadow") or {}).get("shape", "None"))
+            if _shape not in (None, "None"):
+                _dark = st.session_state.get(f"drk_{_p['uid']}", (_p.get("shadow") or {}).get("darkness", 0))
+                _shaded.append((_p["display_id"], _shape, float(_dark)))
+        _shade = ("No shade" if not _shaded
+                  else f"{_shaded[0][1]} · {_shaded[0][0] if n_panels > 1 else 'Panel 1'} · {_shaded[0][2]:.0f} W/m²"
+                  if len(_shaded) == 1 else f"shadow on {len(_shaded)} panels")
+        with ui.collapsible("3 · Shading", "scenario_shading_expanded", summary=_shade,
+                            open_note=f"on {sel_id if (lab or n_panels > 1) else 'Panel 1'}"):
+            uid = sel["uid"]
+            sh = sel.get("shadow") or dict(scn.DEFAULT_SHADOW)
+            st.session_state.setdefault(f"shp_{uid}", sh["shape"])
+            st.session_state.setdefault(f"drk_{uid}", int(sh["darkness"]))
+            st.session_state.setdefault(f"pos_{uid}", int(round(float(sh["position"]) * 100)))
+            # the darkness slider is bounded by the sunlight; keep stored values inside
+            st.session_state[f"drk_{uid}"] = int(min(max(st.session_state[f"drk_{uid}"], 0), base_G))
+            shapes = list(scn.SHAPES)
+            leaf_ok = n_panels == 1 or st.session_state[f"shp_{uid}"] == "Leaf"
+            if not leaf_ok:
+                shapes.remove("Leaf")
+            if st.session_state[f"shp_{uid}"] not in shapes:
+                st.session_state[f"shp_{uid}"] = "None"
+            shape = st.segmented_control("What casts it", shapes, key=f"shp_{uid}",
+                                         help=scn.SHAPE_HELP[st.session_state[f"shp_{uid}"]]) or "None"
+            if not leaf_ok:
+                st.caption("Leaf (part of one section) is available on a single panel only: "
+                           "the validated row engine takes one light level per section.")
+            dark = st.slider("How dark", 0, int(base_G), key=f"drk_{uid}", step=10,
+                             format="%d W/m²", disabled=shape == "None",
+                             help="Light left under the shadow. Lower is darker.")
+            pos = st.slider("Where it falls", 0, 100, key=f"pos_{uid}", step=5, format="%d%%",
+                            disabled=shape in ("None", "Dirt", "Cloud"),
+                            help="Left to right across the panel: which section the shadow "
+                                 "lands on. Dirt and cloud cover the whole panel.")
+            sel["shadow"] = {"shape": shape, "darkness": float(dark), "position": pos / 100.0}
+            b1, b2 = st.columns(2)
+            b1.button("Clear this shadow", key="gm_clear_one", use_container_width=True,
+                      on_click=_clear_shadow_keys, args=([uid],))
+            b2.button("Clear all shadows", key="gm_clear_all", use_container_width=True,
+                      on_click=_clear_shadow_keys, args=([p["uid"] for p in panels],))
+
+    # ================================================================ compute
+    # Every panel's entry is exactly what module_iv / string_iv accept.
+    rows_irr = scn.module_irradiances(system, base_G, _gcfg.N_SUBSTRINGS)
+    for p in panels:                                    # the record carries the widget state
+        p["shadow"] = by_id[p["display_id"]]["shadow"]
     uniform = [float(base_G)] * _gcfg.N_SUBSTRINGS
-    shaded_idx = {ids.index(x) for x in shaded_ids}
-
-    sh = _sim(name, _key(pattern), T)
+    geometry = scn.scenario_geometry(rows_irr, geometry_of)
+    glabel = geometry.replace("_", "-")
+    sel_irr = rows_irr[sel["row"]][sel["pos"]]
+    det = _sim(name, _key(sel_irr), T)
     uns = _sim(name, _key(uniform), T)
-    array_now = len(shaded_idx) * sh["gmpp"]["P"] + (n_panels - len(shaded_idx)) * uns["gmpp"]["P"]
-    array_uns = n_panels * uns["gmpp"]["P"]
-    shadow_type = ("Across the strips" if runs.startswith("across")
-                   else "Along the strips" if runs.startswith("along") else "Diagonal")
-
-    # ------------------------------------------------------------------ center
-    with mid:
-        # The drag and paint tools are gone rather than shown disabled: a control
-        # that can never be enabled is furniture, and the shadow controls on the
-        # left already do the job.
-        st.markdown(
-            f"<div class='bh'>Your panels</div>"
-            f"<div style='font-size:13.5px;color:{c['text_muted']}'>{n_panels} panels in "
-            f"{rows} string{'s' if rows > 1 else ''} — pick one to inspect it.</div>",
-            unsafe_allow_html=True)
-
-        # ---- panel navigation (U3) ----------------------------------------
-        # The drag and paint tools are gone (they could never be enabled), but
-        # walking the array is a real need, so Previous/Next replace them. These
-        # move the INSPECTED panel only: the draft follows, because `sel_irr`
-        # depends on whether this panel is shaded, but nothing else does.
-        default_id = shaded_ids[0] if shaded_ids else ids[0]
-        if st.session_state.get("gm_sel") not in ids:
-            st.session_state["gm_sel"] = default_id
-        cur_idx = ids.index(st.session_state["gm_sel"])
-
-        def _step_panel(delta):
-            """on_click so the keyed selectbox sees the new value on this run."""
-            i = ids.index(st.session_state.get("gm_sel", default_id))
-            st.session_state["gm_sel"] = ids[min(max(i + delta, 0), len(ids) - 1)]
-
-        # wide enough that the labels never truncate to "‹ Pr…" (§51)
-        nav = st.columns([1.15, 2.1, 1.15, 1.6], vertical_alignment="bottom")
-        nav[0].button("‹ Prev", key="gm_panel_prev", use_container_width=True,
-                      disabled=cur_idx == 0, on_click=_step_panel, args=(-1,),
-                      help="Inspect the previous panel in the array. Stops at the "
-                           "first panel; it does not wrap around.")
-        with nav[1]:
-            sel_id = st.selectbox("Select panel", ids, key="gm_sel",
-                                  help="Jump straight to a panel. Changing the inspected "
-                                       "panel updates the draft scenario, because a "
-                                       "shaded panel has a different curve. It does not "
-                                       "change the shadow, the conditions, the scenario "
-                                       "already sent to Watch one run, or your saved scenarios.")
-        nav[2].button("Next ›", key="gm_panel_next", use_container_width=True,
-                      disabled=cur_idx == len(ids) - 1, on_click=_step_panel, args=(1,),
-                      help="Inspect the next panel in the array. Stops at the last "
-                           "panel; it does not wrap around.")
-        sel_idx = ids.index(sel_id)
-        nav[3].markdown(
-            f"<div class='bmono' style='font-size:12.5px;color:{c['text_muted']};"
-            f"padding-bottom:10px'>Panel {_e(sel_id)} of {n_panels}</div>",
-            unsafe_allow_html=True)
-        # A widget's key may only be set from a callback (before the widget is
-        # instantiated), which is how Prev/Next already work. Setting it in the
-        # button's if-branch raised StreamlitWidgetAlreadyInstantiatedError.
-        def _reset_panel(d=default_id):
-            st.session_state["gm_sel"] = d
-            st.toast(f"Inspecting {d} again — nothing else was reset.")
-        st.button("Reset inspected panel", key="tool_clear", on_click=_reset_panel,
-                  help="Go back to the first shaded panel. The shadow, the "
-                       "conditions and everything you have saved are left alone.")
-        st.markdown(_array_svg(rows, per, shaded_idx, sel_idx,
-                               ui.EVENT_COLORS.get(obj, "#C2BFB6"), c, sel_id),
-                    unsafe_allow_html=True)
-        ui.kpi_row([
-            # Not "what the array makes": it is the sum of each module sitting at
-            # its own GMPP, which assumes every optimizer has already found it.
-            ("Array upper bound",
-             f"{array_now/1000:.2f} kW",
-             f"of {array_uns/1000:.2f} kW unshaded · every optimizer at its GMPP",
-             "hero"),
-            ("Shaded panels", str(len(shaded_idx)),
-             "covering everything" if covers_all else f"under the {obj.lower()}"),
-            ("Shadow type", shadow_type, runs),
-        ], weights=[1.25, 1, 1])
-        ui.engine_badge("validated")
-
-    # selected-panel data (real engine)
-    sel_shaded = sel_idx in shaded_idx
-    sel_irr = pattern if sel_shaded else uniform
-    det = sh if sel_shaded else uns
+    powers, shaded_uids = {}, set()
+    for p in panels:
+        entry = rows_irr[p["row"]][p["pos"]]
+        powers[p["uid"]] = _sim(name, _key(entry), T)["gmpp"]["P"]   # cached per pattern
+        if scn.is_shaded(entry, base_G):
+            shaded_uids.add(p["uid"])
+    nested_rows = {r for r, row in enumerate(rows_irr) if any(scn.is_nested(e) for e in row)}
+    focus = scn.focus_panel(system, rows_irr, base_G)
+    condition = {"time_minutes": int(time_minutes), "temperature_c": float(T),
+                 "base_irradiance": float(base_G), "module_irradiances": rows_irr,
+                 "shadow_metadata": [{"uid": p["uid"], "display_id": p["display_id"],
+                                      **p["shadow"]} for p in panels]}
+    draft = scn.build_draft(system, condition, geometry, glabel, focus,
+                            rows_irr[focus["row"]][focus["pos"]],
+                            SPLIT_NAME if _in_val(name) else "not in the validation split")
+    # The draft is rewritten on every render; Watch one run keeps whatever was SENT.
+    st.session_state["scenario_draft"] = draft
+    sel_shaded = sel["uid"] in shaded_uids
     vsub, clamp = _substring_voltages(name, sel_irr, T, det["gmpp"]["I"])
+    states = [_diode_state(vk, clamp) for vk in vsub]
 
-    # ------------------------------------------------------------------ right rail
+    # ================================================================ centre
+    with mid:
+        head = (f"System: {n_series}S × {n_parallel}P · {n_panels} panels" if n_panels > 1
+                else "Panel 1")
+        st.markdown(f"<div class='bh'>{_e(head)}</div>"
+                    + (f"<div style='font-size:13px;color:{c['text_muted']}'>"
+                       f"pick a panel to inspect it — click it, or use the controls below</div>"
+                       if n_panels > 1 else ""), unsafe_allow_html=True)
+        if n_panels > 1:
+            ui.show_chart(scn.topology_figure(system, shaded_uids, sel["uid"], powers, c, lab),
+                          key="gm_topo", on_select="rerun", selection_mode="points")
+            default_id = ids[0]
+            cur_idx = ids.index(sel_id)
+
+            def _step_panel(delta):
+                """on_click so the keyed selectbox sees the new value on this run."""
+                i = ids.index(st.session_state.get("gm_sel", default_id))
+                st.session_state["gm_sel"] = ids[min(max(i + delta, 0), len(ids) - 1)]
+
+            nav = st.columns([1.15, 2.1, 1.15, 1.6], vertical_alignment="bottom")
+            nav[0].button("‹ Prev", key="gm_panel_prev", use_container_width=True,
+                          disabled=cur_idx == 0, on_click=_step_panel, args=(-1,),
+                          help="Inspect the previous panel. Stops at the first; no wrap.")
+            with nav[1]:
+                st.selectbox("Select panel", ids, key="gm_sel",
+                             help="Which panel is shown. View only: it does not change the "
+                                  "shadow, the conditions, the hash or what was sent.")
+            nav[2].button("Next ›", key="gm_panel_next", use_container_width=True,
+                          disabled=cur_idx == len(ids) - 1, on_click=_step_panel, args=(1,),
+                          help="Inspect the next panel. Stops at the last; no wrap.")
+            nav[3].markdown(
+                f"<div class='bmono' style='font-size:12.5px;color:{c['text_muted']};"
+                f"padding-bottom:10px'>Panel {_e(sel_id)} of {n_panels}</div>",
+                unsafe_allow_html=True)
+
+            def _reset_panel(d=default_id):
+                st.session_state["gm_sel"] = d
+
+            st.button("Reset inspected panel", key="tool_clear", on_click=_reset_panel,
+                      help="Show the first panel again. Nothing else changes.")
+        face, info = st.columns([1, 1.1], vertical_alignment="top")
+        face.markdown(scn.module_face_svg(sel_irr, base_G, c, lab, sel["shadow"]["shape"]),
+                      unsafe_allow_html=True)
+        with info:
+            word = {"on": "bypassed", "partial": "partly bypassed", "off": "working"}
+            badges = "".join(
+                f"<span><span style='color:{c['text_muted']}'>{scn.section_name(k, lab)}</span>"
+                f"<span style='color:{c['amber_text'] if s != 'off' else c['text']}'>"
+                f"{word[s]}{' · bypass ' + s if lab else ''}</span></span>"
+                for k, s in enumerate(states))
+            st.markdown(f"<div class='gm-badges'>{badges}"
+                        f"<span><span style='color:{c['text_muted']}'>{'V_oc' if lab else 'open-circuit'}</span>"
+                        f"<span>{det['voc']:.1f} V</span></span></div>", unsafe_allow_html=True)
+            st.markdown(f"<p style='margin-top:10px;font-size:14px;line-height:1.5'>"
+                        f"{_e(scn.bypass_sentence(states, sel_shaded, det['n_peaks'], lab))}</p>",
+                        unsafe_allow_html=True)
+        if lab:
+            st.markdown(f"<div class='bmono' style='font-size:11.5px;color:{c['text_muted']}'>"
+                        f"{_e(sel_id)} · uid {_e(sel['uid'])} · geometry {_e(geometry_label(sel_irr))} · "
+                        f"pattern {_e(str([round(float(x), 0) if not isinstance(x, list) else [round(float(y), 0) for y in x] for x in sel_irr]))}"
+                        f"</div>", unsafe_allow_html=True)
+            ui.engine_badge("validated")
+
+    # ================================================================ right rail
     with right:
         with st.container(border=True):
-            st.markdown(
-                f"<div style='display:flex;align-items:baseline;gap:10px;'>"
-                f"<span class='bh'>Panel {sel_id}</span>"
-                f"<span class='bmono' style='font-size:12px;color:{c['text_muted']}'>"
-                f"{'the one under the shadow' if sel_shaded else 'in full sun'}</span></div>",
-                unsafe_allow_html=True)
-            fc, ft = st.columns([1, 1.1], vertical_alignment="center")
-            fc.markdown(_module_face_svg(sel_irr, base_G, c), unsafe_allow_html=True)
-            with ft:
-                # the shared rule, not a third copy of the threshold (§10)
-                _state = lambda vk: _diode_state(vk, clamp)
-                lines = "".join(
-                    f"<div style='display:flex;justify-content:space-between'>"
-                    f"<span style='color:{c['text_muted']}'>bypass D{i+1}</span>"
-                    f"<span style='color:{c['amber_text'] if _state(vk)!='off' else c['text']}'>"
-                    f"{_state(vk)}</span></div>" for i, vk in enumerate(vsub))
-                st.markdown(
-                    f"<div class='bmono' style='font-size:12.5px;"
-                    f"display:flex;flex-direction:column;gap:7px'>{lines}"
-                    f"<div style='display:flex;justify-content:space-between'>"
-                    f"<span style='color:{c['text_muted']}'>V_oc</span>"
-                    f"<span>{det['voc']:.1f} V</span></div>"
-                    f"<div style='display:flex;justify-content:space-between'>"
-                    f"<span style='color:{c['text_muted']}'>peaks</span>"
-                    f"<span>{det['n_peaks']}</span></div></div>", unsafe_allow_html=True)
+            st.markdown("<div class='bh'>4 · What it makes</div>", unsafe_allow_html=True)
+            scopes = ["This panel", "The row", "Whole system"]
+            if n_panels == 1:
+                scope = "This panel"
+                st.segmented_control("scope", ["This panel"], default="This panel",
+                                     key="gm_scope_one", label_visibility="collapsed")
+                st.caption("The row and Whole system — add panels to unlock.")
+            else:
+                st.session_state.setdefault("gm_scope", "This panel")
+                scope = st.segmented_control("scope", scopes, key="gm_scope",
+                                             label_visibility="collapsed") or "This panel"
+            blocked = ((scope == "The row" and sel["row"] in nested_rows)
+                       or (scope == "Whole system" and nested_rows))
+            if blocked:
+                ui.unavailable(
+                    "The row engine takes one light level per section",
+                    "A Leaf shadow shades part of one section. The validated engine composes "
+                    "a row from one light level per section, so this view cannot be drawn "
+                    "while a Leaf shadow is on a panel in it. Change that panel's shadow to "
+                    "Pole, Tree, Dirt or Cloud, or look at This panel.",
+                    "- `gmppt.device.string_iv` builds each module pattern with "
+                    "`np.asarray(..., dtype=float)`, which rejects nested (sub-substring) "
+                    "entries; `module_iv` alone accepts them. Not changed here: the file is "
+                    "protected.", kind="limit")
+                cur = ref = None
+            elif scope == "The row":
+                row_key = tuple(_key(e) for e in rows_irr[sel["row"]])
+                cur = _sim_string(name, row_key, T)
+                ref = _sim_string(name, tuple(_key(uniform) for _ in range(n_series)), T)
+                making, noshadow, peaks = cur["gmpp"]["P"], ref["gmpp"]["P"], cur["n_peaks"]
+                note_now, note_ref = f"row {sel['row'] + 1} at its real peak", "same row, no shadow"
+            elif scope == "Whole system":
+                cur = _sim_array(name, _key_rows(rows_irr), T, True)
+                ref = _sim_array(name, tuple(tuple(_key(uniform) for _ in range(n_series))
+                                             for _ in range(n_parallel)), T, True)
+                shared, shared_ref = cur["gmpp"]["P"], ref["gmpp"]["P"]
+                optimised = float(sum(powers.values()))
+                optimised_ref = n_panels * uns["gmpp"]["P"]
+                if optimisers:
+                    making, noshadow = optimised, optimised_ref
+                    note_now, note_ref = "every panel at its own real peak", "same system, no shadow"
+                else:
+                    making, noshadow = shared, shared_ref
+                    note_now, note_ref = "one shared tracker at the array's real peak", "same system, no shadow"
+                peaks = cur["n_peaks"]
+            else:
+                cur, ref = det, uns
+                making, noshadow, peaks = det["gmpp"]["P"], uns["gmpp"]["P"], det["n_peaks"]
+                note_now, note_ref = "this panel at its real peak", "same panel, no shadow"
 
-            v1, v2 = st.columns(2)
-            show = v1.segmented_control("view", ["P–V", "I–V"], default="P–V",
-                                        key="gm_pv", label_visibility="collapsed") or "P–V"
-            show_uns = v2.toggle("Show unshaded", key="gm_showuns")
-
-            fig = go.Figure()
-            if show == "P–V":
-                if show_uns and sel_shaded:
-                    fig.add_trace(go.Scatter(x=uns["V"], y=uns["P"], name="unshaded",
+            if cur is not None:
+                fig = go.Figure()
+                if ref is not None and abs(ref["gmpp"]["P"] - cur["gmpp"]["P"]) > 1e-6:
+                    fig.add_trace(go.Scatter(x=ref["V"], y=ref["P"], name="no shadow",
                                              line=dict(color=ui.REF_COLORS["unshaded"],
                                                        width=2, dash="dot")))
-                fig.add_trace(go.Scatter(x=det["V"], y=det["P"], name="with shadow",
+                fig.add_trace(go.Scatter(x=cur["V"], y=cur["P"], name="now",
                                          line=dict(color=c["teal"], width=3)))
-                ui.mark_gmpp(fig, det["gmpp"]["V"], det["gmpp"]["P"],
+                ui.mark_gmpp(fig, cur["gmpp"]["V"], cur["gmpp"]["P"],
+                             label="GMPP" if lab else "the real peak",
                              textposition="top left"
-                             if det["gmpp"]["V"] > 0.7 * (det["voc"] or 1.0)
-                             else "top right")
-                # headroom for the peak label, over EVERY curve drawn — the
-                # unshaded reference is taller than the shaded one
-                top = float(max(det["P"]))
-                if show_uns and sel_shaded:
-                    top = max(top, float(max(uns["P"])))
+                             if cur["gmpp"]["V"] > 0.7 * (cur["voc"] or 1.0) else "top right")
+                top = float(max(cur["P"]))
+                if ref is not None:
+                    top = max(top, float(max(ref["P"])))
                 fig.update_yaxes(range=[0, 1.18 * top])
-                ui.mark_local_peaks(fig, [(v, i, pw) for (v, i, pw) in det["peaks"]
-                                          if abs(pw - det["gmpp"]["P"]) > 1e-6])
-                ui.style_fig(fig, height=230, x_title="Voltage (V)", y_title="Power (W)")
+                ui.mark_local_peaks(fig, [(v, i, pw) for (v, i, pw) in cur["peaks"]
+                                          if abs(pw - cur["gmpp"]["P"]) > 1e-6])
+                ui.style_fig(fig, height=260, x_title="Voltage (V)", y_title="Power (W)")
+                fig.update_layout(showlegend=False, margin=dict(l=48, r=10, t=10, b=40))
+                ui.show_chart(fig, key="gm_scn_pv")
+                # three siblings, equal widths, equal heights (the layout rule)
+                ui.kpi_row([("Making now", f"{making:.0f} W", note_now, "hero"),
+                            ("No shadow", f"{noshadow:.0f} W", note_ref),
+                            ("Peaks", str(peaks), "on the curve shown")])
+                if scope == "Whole system":
+                    if optimisers:
+                        ui.callout(f"With one shared tracker instead — {shared:.0f} W",
+                                   "", "info")
+                    else:
+                        ui.callout(f"With an optimiser on every panel instead — {optimised:.0f} W",
+                                   "", "info")
+                    st.caption("An instantaneous power comparison for this scenario, not a "
+                               "measured energy gain.")
+                if lab:
+                    ui.legend_note("Peaks and the GMPP come from gmppt.device.analyse on the "
+                                   "curve shown. Scenario outputs, not benchmark results.")
+
+        # ========================================================== 5 · hand over
+        with st.container(border=True):
+            st.markdown("<div class='bh'>5 · Hand it to the tracker</div>", unsafe_allow_html=True)
+            st.markdown(f"<p style='font-size:14px;line-height:1.5;margin:6px 0'>"
+                        f"{_e(scn.summary_sentence(system, condition))}</p>", unsafe_allow_html=True)
+            if lab:
+                st.markdown(
+                    f"<div class='bmono' style='font-size:11.5px;color:{c['text_muted']};line-height:1.7'>"
+                    f"{n_series}S × {n_parallel}P · optimisers {'on' if optimisers else 'off'} · "
+                    f"blocking diodes on · validated engine · geometry {_e(glabel)}<br>"
+                    f"hash {_e(draft['hash'])} · system {_e(draft['system_hash'])} · handed "
+                    f"panel {_e(focus['display_id'])} (the most shaded)</div>", unsafe_allow_html=True)
+            sent = st.session_state.get("scenario_sent")
+            if not sent:
+                status, tone = "● not sent yet", c["text_muted"]
+            elif sent.get("hash") == draft["hash"]:
+                status, tone = "● sent", c["teal"]
             else:
-                fig.add_trace(go.Scatter(x=det["V"], y=det["I"], name="I–V",
-                                         line=dict(color="#2C7FA0", width=3)))
-                ui.style_fig(fig, height=230, x_title="Voltage (V)", y_title="Current (A)")
-            fig.update_layout(showlegend=False, margin=dict(l=48, r=10, t=10, b=40))
-            ui.show_chart(fig)
-
+                status, tone = "● changed since sent", c["amber_text"]
+            st.markdown(f"<div class='gm-status' style='color:{tone}'>{status}</div>",
+                        unsafe_allow_html=True)
             with st.container(key="next-panelsend"):
-                if st.button("Send this panel to the trackers  →", key="send_trackers",
-                             type="primary", use_container_width=True):
+                if st.button("Send this setup" if not sent else "Send again", key="send_trackers",
+                             type="primary", use_container_width=True,
+                             disabled=bool(sent) and sent.get("hash") == draft["hash"],
+                             help="Hands this exact scenario to the tracker pages. The "
+                                  "footer's Next takes you there."):
                     _send_scenario()
-                    st.switch_page(P["run"])
+                    st.toast("Sent. The tracker pages now run this scenario.")
+                    st.rerun()
 
-        ui.callout("Not this page. The optimizer behind this panel measures its own "
-                   "voltage and current, one point at a time, plus one temperature. "
-                   "This view is for you.", "What the algorithm gets to see", "caveat")
+    _dynamic_pointer(c)
 
-    # The draft is rewritten on every render, so Inside a panel always shows what
-    # is on screen here. Testing keeps running whatever was last SENT.
-    _set_draft(name, T, sel_irr, f"Panel {sel_id} · {obj}")
 
-    # ------------------------------------------------------------------ day timeline (functional)
-    _default_t0, _default_t1 = _day_window_from_hour(15.0, duration=1.5)
-    st.session_state.setdefault("day_events", [{"kind": "Pole or vent",
-                                                "t0": _default_t0, "t1": _default_t1,
-                                                "motion": "fixed in place",
-                                                "created_at_hour": 15.0,
-                                                "uid": _day_uid()}])
-    _day_migrate(st.session_state["day_events"])   # events restored from a session file
+def _dynamic_pointer(c):
+    """Where the day went: the event timeline is a Dynamic test page now. It
+    inherits the system sent from here and adds G(t), T(t) and Shade(t) in
+    canonical minutes; nothing about the topology is rebuilt there."""
     with st.container(border=True):
-        hd = st.columns([4, 1.6], vertical_alignment="center")
-        hd[0].markdown(
-            f"<span class='bh' style='font-size:17px'>Shading events over the day</span>"
+        a, b = st.columns([3.2, 1.3], vertical_alignment="center")
+        a.markdown(
+            f"<span class='bh'>Let it change through the day</span>"
             f"<span style='font-size:13px;color:{c['text_muted']};margin-left:10px'>"
-            f"add events, set their timing and motion, then run the whole day</span>",
+            f"the Dynamic test inherits this PV system unchanged and adds sunlight, "
+            f"temperature and shading that move — build the timeline after sending</span>",
             unsafe_allow_html=True)
-        run_day = hd[1].button("Run the whole day through the trackers", key="day_run_btn",
-                               type="primary", use_container_width=True)
-        st.markdown(f"<span style='font-size:11.5px;font-weight:600;letter-spacing:.05em;"
-                    f"text-transform:uppercase;color:{c['text_muted']}'>Add an event</span>",
-                    unsafe_allow_html=True)
-        _kinds = ["Row in front", "Pole or vent", "Tree branch", "Cloud", "Soiling",
-                  "Bird dropping", "Leaf", "Snow band", "Building edge", "Paint your own"]
-        cc = st.columns(len(_kinds))
-        for _k, _kind in enumerate(_kinds):
-            cc[_k].button(_kind, key=f"day_add_{_k}", on_click=_day_add, args=(_kind,),
-                          use_container_width=True)
-        ph_t = st.slider("Event time / playhead", 6.0, 18.0, 15.0, 0.25, key="day_time", format="%.2f")
-        st.caption("Select a time, then add an event. The new event starts at the selected time; adjust its duration and motion below.")
-        st.markdown(_day_timeline_svg(st.session_state["day_events"], (ph_t - 6) / 12, c),
-                    unsafe_allow_html=True)
-        with st.expander("Day behaviour \u2014 timing and motion of each event", expanded=False):
-            st.caption("Motion belongs to the day timeline: it decides how an event "
-                       "changes while it passes, not what the single-moment curve above "
-                       "looks like.")
-            _rm = None
-            for _ev in list(st.session_state["day_events"]):
-                _ev.setdefault("motion", "fixed in place")
-                _uid = _ev["uid"]
-                ec = st.columns([1.5, 2.5, 1.8, 0.5], vertical_alignment="center")
-                ec[0].markdown(f"**{_ev['kind']}**")
-                _w = ec[1].slider(f"window {_uid}", 6.0, 18.0,
-                                  (6 + _ev["t0"] * 12, 6 + _ev["t1"] * 12), 0.25,
-                                  key=f"day_win_{_uid}", label_visibility="collapsed")
-                if (_w[0] - 6) / 12 != _ev["t0"] or (_w[1] - 6) / 12 != _ev["t1"]:
-                    st.session_state.pop("day_scenario_samples", None)
-                    st.session_state.pop("day_ran", None)
-                _ev["t0"], _ev["t1"] = (_w[0] - 6) / 12, (_w[1] - 6) / 12
-                _opts = _day_motions_for(_ev["kind"])
-                if _ev["motion"] not in _opts:
-                    _ev["motion"] = _opts[0]
-                _new_motion = ec[2].selectbox(
-                    f"motion {_uid}", _opts, index=_opts.index(_ev["motion"]),
-                    key=f"day_mot_{_uid}", label_visibility="collapsed",
-                    help="Day-event motion \u2014 how the shadow changes across its own window.")
-                if _new_motion != _ev["motion"]:
-                    st.session_state.pop("day_scenario_samples", None)
-                    st.session_state.pop("day_ran", None)
-                _ev["motion"] = _new_motion
-                if ec[3].button("\u2715", key=f"day_rm_{_uid}"):
-                    _rm = _uid
-            if _rm is not None:
-                _day_drop(_rm); st.rerun()
-            if st.button("Clear all events", key="day_clear"):
-                for _e2 in st.session_state["day_events"]:
-                    for _k2 in (f"day_win_{_e2.get('uid')}", f"day_mot_{_e2.get('uid')}"):
-                        st.session_state.pop(_k2, None)
-                st.session_state["day_events"] = []
-                st.session_state.pop("day_scenario_samples", None)
-                st.session_state.pop("day_ran", None)
-                st.rerun()
-
-        # ------------------------------------------------------------------ scenario bridge
-        # The timeline creates temporal event definitions. Sampling them produces
-        # instantaneous irradiance recipes that the interactive Simulator can load.
-        # The module itself is not silently converted between the validated and
-        # simplified engines.
-        if st.session_state["day_events"]:
-            with st.expander("Use these events as simulator scenarios", expanded=False):
-                st.caption("Sample the active event windows into static 15-minute scenario states. "
-                           "The event timing and substring irradiance are transferred; the "
-                           "Simulator uses its own datasheet module and simplified engine.")
-                if st.button("Create scenario samples", key="day_make_samples", use_container_width=True):
-                    st.session_state["day_scenario_samples"] = _day_sample_scenarios(
-                        st.session_state["day_events"], base_G, T, name, step_minutes=15)
-                samples = st.session_state.get("day_scenario_samples") or []
-                if samples:
-                    st.success(f"Created {len(samples)} instantaneous scenario states from the event window.")
-                    sdf = pd.DataFrame([{
-                        "Time": x["time_label"],
-                        "Sunlight (W/m²)": round(x["base_irradiance_Wm2"]),
-                        "Substring irradiance (W/m²)": str([round(v) for v in x["substring_irradiance_Wm2"]]),
-                        "Events": ", ".join(x["active_events"]),
-                    } for x in samples])
-                    st.dataframe(sdf, hide_index=True, width="stretch")
-                    sc_idx = st.selectbox("Sample to load", range(len(samples)),
-                                          format_func=lambda i: samples[i]["time_label"] + " · " + ", ".join(samples[i]["active_events"]),
-                                          key="day_sample_pick")
-                    if st.button("Load selected irradiance into Simulator", key="day_load_sim",
-                                  type="primary", use_container_width=True):
-                        st.session_state["day_sim_import"] = dict(samples[sc_idx])
-                        st.switch_page(P["sim_setup"])
-                    import json as _json
-                    _day_json = _json.dumps(samples, indent=2)
-                    st.download_button("Download sampled scenarios (JSON)", _day_json,
-                                       "day_event_scenarios.json", "application/json",
-                                       use_container_width=True, key="day_samples_json")
-        # The tracker run itself lives on Testing · Dynamic irradiance, under
-        # "Your day", where it can sit beside the gated EN 50530 result and be
-        # labelled against it. This page builds, times and samples the events.
-        st.session_state["day_context"] = {"module": name, "temp": int(T),
-                                           "base_G": int(base_G)}
-        if run_day:
-            st.switch_page(P["moving"])
+        with b:
+            st.page_link(P["timeline"], label="Dynamic test · Timeline →")
 
 
 def page_inside():
     # Sections, top to bottom (§15): orientation → operating point → panel
     # response → substring state → why the curve has steps → next action. One
     # idea per section, no bordered card around ordinary text (§20).
-    ui.page_intro("Inside a panel",
-                  "Move the operating point and see how the panel responds.",
-                  "Inspect · Inside a panel")
+    ui.page_intro("PV analysis",
+                  "Why this condition gives this curve: the shadow, the sections it "
+                  "weakens, the bypass diodes it switches, and the peaks that leaves.",
+                  "Scenario · PV analysis")
     draft = st.session_state.get("scenario_draft")
     if not draft:
-        ui.callout("Set up a shadow on the panels page first — this page explains "
-                   "that result.", "Nothing to show yet", "info")
-        st.page_link(P["panels"], label="Go to the panels →")
+        ui.callout("Build a system and put a shadow on it on Build system first — this "
+                   "page explains that result.", "Nothing to show yet", "info")
+        st.page_link(P["panels"], label="Go to Build system →")
         return
     c = ui.T()
     name, T = draft["module"], float(draft["temp"])
@@ -1419,7 +1210,70 @@ def page_inside():
     irr_key = _key(irr)
     det = _sim(name, irr_key, T)
     voc = det["voc"] or 1.0
-    st.caption(f"The scenario you are editing on The panels: {draft.get('label', name)}.")
+    focus = (draft.get("focus_panel") or {}).get("display_id", "the handed panel")
+    st.caption(f"The scenario you are editing on Build system: {draft.get('label', name)} · "
+               f"analysing {focus}, the panel handed to the trackers. This page reads the "
+               f"draft; it edits nothing.")
+
+    # ---------------------------------------------------------- shadow → sections → curve
+    # Cause and effect in one row, all from the same engine call: the shadow on
+    # the panel face, each section's bypass state at the true peak, and the
+    # curve with and without the shadow. (§16–17)
+    ui.section_head("What the shadow did",
+                    "shading → section irradiance → bypass state → P–V landscape → peaks")
+    base_G = float((draft.get("static_condition") or {}).get(
+        "base_irradiance", max((max(e) if isinstance(e, list) else e) for e in irr)))
+    uns0 = _sim(name, _key([base_G] * _gcfg.N_SUBSTRINGS), T)
+    vsub0, clamp0 = _substring_voltages(name, irr, T, det["gmpp"]["I"])
+    states0 = [_diode_state(vk, clamp0) for vk in vsub0]
+    shaded0 = scn.is_shaded(irr, base_G)
+    shape0 = next((m.get("shape") for m in (draft.get("static_condition") or {}).get(
+        "shadow_metadata", []) if m.get("uid") == (draft.get("focus_panel") or {}).get("uid")),
+        "None")
+    f1, f2, f3 = st.columns([0.85, 1.0, 1.5], gap="medium")
+    with f1:
+        st.markdown(scn.module_face_svg(irr, base_G, c, False, shape0 or "None", width=170),
+                    unsafe_allow_html=True)
+    with f2:
+        word = {"on": "bypassed", "partial": "partly bypassed", "off": "working"}
+        cells = "".join(
+            f"<div class='gm-sub'><b>{scn.section_name(k, False)}</b>"
+            f"<span>{(sum(e) / len(e)) if isinstance(e, list) else e:.0f} W/m² of light</span>"
+            f"<span style='color:{c['amber_text'] if s != 'off' else c['text']};font-weight:600'>"
+            f"{word[s]} at the true peak</span></div>"
+            for k, (e, s) in enumerate(zip(irr, states0)))
+        st.markdown(f"<div class='gm-subrow' style='grid-template-columns:1fr'>{cells}</div>",
+                    unsafe_allow_html=True)
+        st.markdown(f"<p style='margin-top:8px;font-size:13.5px;line-height:1.5'>"
+                    f"{_e(scn.bypass_sentence(states0, shaded0, det['n_peaks'], False))}</p>",
+                    unsafe_allow_html=True)
+    with f3:
+        fig0 = go.Figure()
+        if abs(uns0["gmpp"]["P"] - det["gmpp"]["P"]) > 1e-6:
+            fig0.add_trace(go.Scatter(x=uns0["V"], y=uns0["P"], name="no shadow",
+                                      line=dict(color=ui.REF_COLORS["unshaded"], width=2,
+                                                dash="dot")))
+        fig0.add_trace(go.Scatter(x=det["V"], y=det["P"], name="with the shadow",
+                                  line=dict(color=c["teal"], width=3)))
+        ui.mark_gmpp(fig0, det["gmpp"]["V"], det["gmpp"]["P"],
+                     textposition="top left" if det["gmpp"]["V"] > 0.7 * voc else "top right")
+        ui.mark_local_peaks(fig0, [(v, i, pw) for (v, i, pw) in det["peaks"]
+                                   if abs(pw - det["gmpp"]["P"]) > 1e-6])
+        fig0.update_yaxes(range=[0, 1.18 * max(float(max(det["P"])), float(max(uns0["P"])))])
+        ui.style_fig(fig0, height=260, x_title="voltage  V", y_title="power  W")
+        fig0.update_layout(legend=dict(orientation="h", y=1.12, x=0),
+                           margin=dict(l=48, r=10, t=10, b=40))
+        ui.show_chart(fig0, key="inside_overlay")
+    ui.kpi_row([("True peak", f"{det['gmpp']['P']:.0f} W", "with the shadow"),
+                ("No shadow", f"{uns0['gmpp']['P']:.0f} W", "same panel, same conditions"),
+                ("Lost to shade", f"{max(0.0, uns0['gmpp']['P'] - det['gmpp']['P']):.0f} W",
+                 "the hardware's problem, not the tracker's"),
+                ("Peaks", str(det["n_peaks"]), "lower peaks are traps for a hill-climber")])
+    ui.callout("A bypassed section drops out of the voltage sum, which puts a step in the "
+               "curve; a peak can sit on either side of every step. The mapping from a "
+               "section to a peak is not one-to-one — the sweep at the foot of this page "
+               "shows where each diode actually switches.", "How to read it", "info")
+    st.space(size="small")
 
     # ---------------------------------------------------------- operating point
     ui.section_head("Operating point",
@@ -1514,16 +1368,16 @@ def page_inside():
             "- Diode state is read from the substring's own element I–V curve at the "
             "string current: on when its voltage is at the diode clamp, partly on "
             "when it has gone negative but not to the clamp, off otherwise.\n"
-            "- The table above, the sweep below and the bypass table on The panels "
+            "- The table above, the sweep below and the bypass table on Scenario "
             "all use this one rule.")
 
     # ---------------------------------------------------------- next action
     st.space(size="small")
     ui.section_head("Next", "send this exact scenario to the tracking methods")
     a, b = st.columns([1.3, 3], vertical_alignment="center")
-    if a.button("Watch the trackers →", key="inside_send", type="primary",
+    if a.button("Run the static test →", key="inside_send", type="primary",
                 use_container_width=True,
-                help="Sends the scenario you are looking at to Watch one run."):
+                help="Sends the scenario you are looking at to Static test · One run."):
         _send_scenario()
         st.switch_page(P["run"])
     b.markdown(f"<span style='color:{c['text_muted']};font-size:0.9rem'>Each method "
@@ -1650,7 +1504,7 @@ def _a3_voltage_sweep(name, irr, T, det, clamp):
         caption = (f"Sweeping the whole curve, no bypass diode ever fully turns on — "
                    f"yet the curve still has {n_pk} peaks. They come from shading "
                    f"within the strips rather than from a strip dropping out. "
-                   f"Deepen the shadow on The panels to make a diode switch.")
+                   f"Deepen the shadow on Scenario to make a diode switch.")
     else:
         caption = (f"Sweeping from 0 V to {float(det['voc']):.1f} V, no bypass diode "
                    f"changes state and the curve has a single peak — this is the "
@@ -1854,22 +1708,6 @@ def _a4_detail(facts, key_frames, build_s):
             f"stays inside the JSON budget; the solve itself is at full "
             f"resolution.\n"
             f"- Built in {build_s:.2f} s.")
-
-
-def page_system():
-    ui.page_intro("Whole system",
-                  "Planned extension: electrical interaction across several modules, "
-                  "strings and array configurations.", "Inspect · Whole system (planned)")
-    ui.not_built("Whole-system array analysis",
-                 "Every other page models one module and, in the Simulator, scales its power "
-                 "to an array. This page will solve the array itself — series/parallel "
-                 "mismatch between modules and strings, then DC/DC and inverter losses — "
-                 "and separate what shading cost from what tracking cost. It needs a string "
-                 "and inverter model that does not exist yet, so nothing is shown rather "
-                 "than an estimate.")
-    ui.callout("Nothing on this page is computed yet. The array figures you can see today "
-               "are on the Simulator, where array power is the module result multiplied by "
-               "the array scaling.", "Why this page is empty", "info")
 
 
 # =========================================================================== #
@@ -2123,9 +1961,9 @@ def page_sim_setup():
     c = ui.T()
     day_import = st.session_state.pop("day_sim_import", None)
     _bench_css(c)
-    ui.page_intro("Set up a panel",
+    ui.page_intro("Simulator",
                   "Type a datasheet in yourself and watch the curve — a separate, "
-                  "simplified engine.", "Sandbox · Set up a panel")
+                  "simplified engine.", "Sandbox · Simulator")
 
     with st.container(key="benchroot"):
         if day_import:
@@ -2139,7 +1977,7 @@ def page_sim_setup():
                 st.session_state[f"bench_s{i}"] = float(value)
             st.session_state["bench_scen_name"] = f"Day event · {day_import.get('time_label', 'sample')}"
             st.session_state["bench_import_meta"] = {
-                "source": day_import.get("source", "Explore · day-event timeline"),
+                "source": day_import.get("source", "Dynamic test · Timeline"),
                 "time_label": day_import.get("time_label"),
                 "time_hour": day_import.get("time_hour"),
                 "active_events": list(day_import.get("active_events", [])),
@@ -2189,7 +2027,7 @@ def page_sim_setup():
                            f"This is the <b>simplified engine</b>; every workflow page uses the validated one on reference-database panels. "
                            f"The two never mix — a day-event import carries irradiance conditions only.</span>", unsafe_allow_html=True)
             with bb[2]:
-                st.page_link(P["panels"], label="The panels (validated) →")
+                st.page_link(P["panels"], label="Scenario (validated) →")
 
         left, mid, right = st.columns([0.92, 1.55, 1.05], gap="medium")
 
@@ -2353,8 +2191,7 @@ def page_sim_setup():
                                "computed. Press “Run simulation” to update it.",
                                "Showing the last run", "caveat")
                 with st.container(border=True):
-                    tabs = st.tabs(["I–V / P–V", "Substrings", "Peaks", "Cell map",
-                                    "Parametric sweep"])
+                    tabs = st.tabs(["I–V / P–V", "Substrings", "Peaks", "Cell map"])
                     with tabs[0]:
                         st.caption("Solved on an 800-point current grid; downloads "
                                    "carry 256 points.")
@@ -2443,14 +2280,10 @@ def page_sim_setup():
                         ui.legend_note("Each substring is a row band (this engine holds one "
                                        "irradiance per strip).")
 
-                    with tabs[4]:
-                        # app.render_sweep() exists and works; this tab showed a
-                        # not_built placeholder beside it. (N6)
-                        st.caption("Sweeps the built-in module presets across a "
-                                   "temperature × irradiance matrix. It does not read the "
-                                   "datasheet you typed on the left — it has its own "
-                                   "module picker below.")
-                        sim.render_sweep()
+                    # The parametric sweep is its own Sandbox page (Sweep): it has
+                    # its own module picker and does not read this datasheet.
+                    st.page_link(P["sim_sweep"],
+                                 label="Sweep the presets across temperature × irradiance →")
 
         # ============================================================= RIGHT
         with right:
@@ -2512,7 +2345,7 @@ def page_sim_setup():
                     if st.button("Use this module for a dataset", key="bench_to_dataset",
                                  use_container_width=True,
                                  help="Copies this datasheet, substring count and "
-                                      "conditions into Make a dataset"):
+                                      "conditions into the Dataset generator"):
                         _bench_to_dataset(r_ds, r_nsub, r_mstr, r_pstr, r_baseG, r_T)
                         st.switch_page(P["sim_dataset"])
                     st.page_link(P["sim_saved"], label="Saved scenarios")
@@ -2522,7 +2355,7 @@ def page_sim_setup():
                     st.markdown(
                         f"<div style='margin-top:10px;padding-top:10px;border-top:1px solid "
                         f"{c['border']};font-size:12px;line-height:1.5;color:{c['text_muted']}'>"
-                        f"Scenarios for the trackers come from <b>Understand · The panels</b>, "
+                        f"Scenarios for the trackers come from <b>Scenario · Build system</b>, "
                         f"which runs the validated engine on a CEC module. A bench curve "
                         f"cannot be sent there — the two engines take different module "
                         f"definitions.</div>", unsafe_allow_html=True)
@@ -2539,20 +2372,20 @@ def page_sim_setup():
                 "<p style='margin:7px 0 0 0;font-size:12.5px;line-height:1.5;color:#2B3238'>"
                 "Shade is one value per strip, so a shadow covering part of a strip "
                 "cannot be drawn here, and a cell driven into reverse-bias breakdown is "
-                "not modelled. Both are handled by the validated engine on The panels."
+                "not modelled. Both are handled by the validated engine on Scenario."
                 "</p></div>", unsafe_allow_html=True)
 
 
 def page_sim_saved():
     ui.page_intro("Saved scenarios",
-                  "Load a saved scenario back onto Set up a panel, or compare the ones "
+                  "Load a saved scenario back onto the Simulator, or compare the ones "
                   "you have kept.", "Sandbox · Saved scenarios")
     saved = st.session_state.get("frozen") or []
     if not saved:
-        ui.callout("Nothing saved yet. On Set up a panel, run a simulation and press "
+        ui.callout("Nothing saved yet. On the Simulator, run a simulation and press "
                    "“Freeze this curve” or “Save to Saved scenarios”.",
                    "No saved scenarios", "info")
-        st.page_link(P["sim_setup"], label="Go to Set up a panel →")
+        st.page_link(P["sim_setup"], label="Go to the Simulator →")
         return
 
     with st.container(border=True):
@@ -2564,7 +2397,7 @@ def page_sim_saved():
         rec = saved[pick]
         loadable = bool((rec.get("config") or {}).get("bench"))
         bc = st.columns([1.4, 1.4, 4])
-        if bc[0].button("Load onto Set up a panel", key="saved_load", type="primary",
+        if bc[0].button("Load onto the Simulator", key="saved_load", type="primary",
                         disabled=not loadable, use_container_width=True,
                         help=None if loadable else
                         "This scenario was saved without the Set-up-a-panel controls, "
@@ -2614,7 +2447,7 @@ def _a9_sandbox_morph(saved):
         ui.unavailable(
             "Not enough saved scenarios",
             "Two or more saved curves are needed to morph between them. Save "
-            "another on Set up a panel and this appears.",
+            "another on the Simulator and this appears.",
             "- Source: `st.session_state.frozen`, read only. "
             "`st.session_state.sweep_results` is used instead when app.py's "
             "parametric sweep has been run in this session.")
@@ -2667,17 +2500,30 @@ def _a9_sandbox_morph(saved):
 
 
 def page_sim_dataset():
-    ui.page_intro("Make a dataset",
-                  "Generate thousands of scenarios with a fixed seed and download them.",
-                  "Sandbox · Make a dataset")
+    ui.page_intro("Dataset generator",
+                  "Generate thousands of scenarios with a fixed seed, look at what you "
+                  "generated, and download them.", "Sandbox · Dataset generator")
     _dsheet = sim.current_ds()
     st.caption(f"Generating from: {st.session_state.get('ds_name', '—')} · "
                f"{_dsheet['Ns']} cells · {st.session_state.get('topo_nsub', '—')} substrings. "
-               f"Use “Use this module for a dataset” on Set up a panel to change it.")
+               f"Use “Use this module for a dataset” on the Simulator to change it.")
     sim.render_dataset_section()
     ui.callout("These scenarios are produced by the interactive simulator, not by the "
-               "validated engine behind the benchmark figures.",
+               "validated engine behind the benchmark figures. They never reach Results.",
                "Which engine made this dataset", "caveat")
+    st.divider()
+    _dataset_view()
+
+
+def page_sim_sweep():
+    ui.page_intro("Sweep",
+                  "The built-in presets across a temperature × irradiance grid, on the "
+                  "simplified engine.", "Sandbox · Sweep")
+    st.caption("This sweep has its own module picker; it does not read the datasheet "
+               "typed on the Simulator. Its curves feed the morph on Saved scenarios "
+               "when fewer than two scenarios are saved.")
+    sim.render_sweep()
+    ui.engine_badge("simplified")
 
 
 # =========================================================================== #
@@ -2851,9 +2697,10 @@ def page_run():
     import numpy as np
     c = ui.T()
     disp, mono = ui.FONTS["display"], ui.FONTS["mono"]
-    ui.page_intro("Watch one run",
-                  "Watch each tracking method search the same curve, step by step.",
-                  "Watch · Watch one run")
+    ui.page_intro("One run",
+                  "One frozen condition. Watch each tracking method search the same "
+                  "curve, step by step: where it starts, what it measures, where it stops.",
+                  "Static test · One run")
     st.markdown(f"<style>.bh{{font-family:{disp};font-weight:700;color:{c['text']};}}"
                 f".bmono,.bmono *{{font-family:{mono};}}"
                 f"div.st-key-runtabs a{{padding:10px 14px;font-size:14px;"
@@ -2870,21 +2717,23 @@ def page_run():
         _irrkey = _key(_sc["irr"])
         d = _run_scenario(_sc["module"], _sc["temp"], _irrkey)
         _resend_notice()
+        ui.data_chip("Exploratory", "Your scenario, one frozen condition, validated engine. "
+                                    "Not a benchmark result.")
         if st.button("Discard sent scenario", key="run_use_example",
-                     help="Drops the scenario Explore sent and returns this page to the "
-                          "built-in example. Nothing on Explore is changed."):
+                     help="Drops the scenario Build system sent and returns this page to "
+                          "the built-in example. Nothing on Build system is changed."):
             st.session_state.pop("scenario_sent", None)
             st.toast("Sent scenario discarded — showing the example again.")
             st.rerun()
     else:
         _demo = _run_demo()
-        if not assert_val_modules([_demo["module"]], "Watch one run"):
+        if not assert_val_modules([_demo["module"]], "One run"):
             return
         d = _run_scenario(_demo["module"], _demo["temp"], _demo["irr"])
         _note = _demo_module()[3]
         ui.callout(
             f"This is the built-in example: {_demo['module']} under a three-region "
-            f"shadow. Build your own on Understand · The panels and send it here."
+            f"shadow. Build your own on Scenario · Build system and send it here."
             + (f" {_note}" if _note else ""),
             "Showing the example scenario", "info")
         _unseen_check(_demo["module"])
@@ -3062,11 +2911,11 @@ def page_run():
                            "Readings for P&O and InC are not separately reported by the "
                            "exports.")
             with st.container(key="seeall"):
-                st.page_link(P["compare"],
-                             label="One scenario proves nothing — see the whole set →")
+                st.page_link(P["static_compare"],
+                             label="Every method on this condition, side by side →")
 
         with st.container(key="seereloc"):
-            st.page_link(P["relocation"],
+            st.page_link(P["compare"],
                          label="What happens when the peak jumps to another strip \u2192")
 
     # ---- A2: how the seed decides, then A1: what every method does ----
@@ -3485,6 +3334,192 @@ def _a2_detail(d, frames):
             f"here. (N1/D3)")
 
 
+# =========================================================================== #
+# Static test · Compare methods — every method on the SAME sent condition.
+#
+# The scores are the harness's own (Trajectory.metrics, through _score_traj):
+# the code p7 summarises into the validated exports. This page lays them side
+# by side for ONE scenario and says so. Nothing here is a benchmark number; the
+# split-wide comparison is Results · Static performance.
+# =========================================================================== #
+PROPOSED = "Hybrid (bounded)"          # the proposed GMPPT method as shipped (D4)
+_STATIC_ORDER = ["P&O", "InC", "PSO", "Model only", PROPOSED, "Hybrid (free)",
+                 "Perfect tracker"]
+_ROLE = {"P&O": "baseline", "InC": "baseline", "PSO": "baseline",
+         "Model only": "ablation", PROPOSED: "proposed", "Hybrid (free)": "variant",
+         "Perfect tracker": "control"}
+
+
+def _static_scenario(what):
+    """(run, record or None, is_example). The one rule for the Static test pages:
+    they run the SENT scenario; the built-in example stands in only while
+    nothing has been sent, and says so."""
+    sc = st.session_state.get("scenario_sent")
+    if sc:
+        return _run_scenario(sc["module"], sc["temp"], _key(sc["irr"])), sc, False
+    demo = _run_demo()
+    if not assert_val_modules([demo["module"]], what):
+        return None, None, True
+    return _run_scenario(demo["module"], demo["temp"], demo["irr"]), None, True
+
+
+def _static_scenario_line(sc, is_example):
+    """One line saying whose scenario the page is running."""
+    if is_example:
+        demo = _run_demo()
+        _note = _demo_module()[3]
+        ui.callout(f"Nothing has been sent from Scenario yet, so this is the built-in "
+                   f"example: {demo['module']} under a three-region shadow."
+                   + (f" {_note}" if _note else ""),
+                   "Showing the example scenario", "info")
+        st.page_link(P["panels"], label="Build and send your own →")
+        return
+    ui.data_chip("Exploratory", "Your scenario, one frozen condition, validated engine. "
+                                "Not a benchmark result.")
+    st.caption(f"{sc.get('label', '')} · {sc.get('module', '')} · {sc.get('pattern', '')} · "
+               f"{sc.get('geometry_label', '')} · {float(sc.get('temp', 0)):.0f} °C · "
+               f"hash {sc.get('hash', '')}")
+
+
+def page_static_compare():
+    import json
+    c = ui.T()
+    ui.page_intro("Compare methods",
+                  "P&O, InC, PSO and the proposed method on the same frozen condition.",
+                  "Static test · Compare methods")
+    d, sc, is_example = _static_scenario("Compare methods")
+    if d is None:
+        return
+    _static_scenario_line(sc, is_example)
+    if not is_example:
+        _resend_notice()
+
+    methods = [m for m in _STATIC_ORDER if m in d["methods"]]
+    pso_reads, _ = _pso_readings(_load_json("phase2/pso_comparison_val.json"))
+
+    def reads(m):
+        return pso_reads if m == "PSO" else _READINGS_FIXED.get(m.split(" (")[0])
+
+    rows = []
+    for m in methods:
+        r = d["methods"][m]
+        rows.append({"method": m, "role": _ROLE.get(m, ""), "reached": bool(r["reached"]),
+                     "steady_eff_pct": float(r["steady_eff_pct"]),
+                     "steps": (None if not r["reached"] else r["steps"]),
+                     "readings": reads(m), "lost_w": float(r["lost"])})
+
+    default = [m for m in ("P&O", "InC", "PSO", PROPOSED) if m in methods]
+    sel = st.segmented_control("Show on the landscape", methods, selection_mode="multi",
+                               default=None if "sc_show" in st.session_state else default,
+                               key="sc_show") or default
+
+    left, right = st.columns([1.45, 1], gap="large")
+    with left:
+        with st.container(border=True):
+            st.markdown(_bh_run("The same landscape, every method") +
+                        f"<span style='font-size:13px;color:{c['text_muted']};"
+                        f"margin-left:10px'>where each one started, its path, and where "
+                        f"it stopped</span>", unsafe_allow_html=True)
+            V, Pw = np.asarray(d["V"], float), np.asarray(d["P"], float)
+            fig = go.Figure()
+            fig.add_trace(go.Scatter(x=V, y=Pw, name="P–V",
+                                     line=dict(color=c["teal"], width=2.5)))
+            fig.add_trace(go.Scatter(x=[d["v_gmpp"]], y=[d["p_gmpp"]], mode="markers",
+                                     name="true peak",
+                                     marker=dict(symbol="star", size=15,
+                                                 color=ui.PEAK_COLORS["gmpp"])))
+            for m in sel:
+                r = d["methods"].get(m)
+                if not r:
+                    continue
+                vh, ph = np.asarray(r["v_hist"], float), np.asarray(r["p_hist"], float)
+                col = ui.method_style(m)["color"]
+                sym = _A1_SYMBOLS.get(m.split(" (")[0], "circle")
+                fig.add_trace(go.Scatter(x=vh[::4], y=ph[::4], mode="lines",
+                                         line=dict(color=col, width=1.2, dash="dot"),
+                                         opacity=0.55, showlegend=False, hoverinfo="skip"))
+                fig.add_trace(go.Scatter(x=[vh[0]], y=[ph[0]], mode="markers",
+                                         marker=dict(color=col, size=8, symbol="circle-open",
+                                                     line=dict(width=2)),
+                                         showlegend=False, hoverinfo="skip"))
+                fig.add_trace(go.Scatter(x=[vh[-1]], y=[ph[-1]], mode="markers", name=m,
+                                         marker=dict(color=col, size=12, symbol=sym,
+                                                     line=dict(color="#fff", width=1))))
+                lab = "found it" if r["reached"] else f"stops · −{r['lost']:.0f} W"
+                fig.add_annotation(x=vh[-1], y=ph[-1], text=lab, showarrow=True,
+                                   arrowhead=0, ax=0, ay=-22, font=dict(size=10, color=col))
+            fig.update_yaxes(range=[0, 1.18 * float(max(Pw))])
+            ui.style_fig(fig, height=380, x_title="terminal voltage  V", y_title="power  W")
+            fig.update_layout(legend=dict(orientation="h", y=1.06, x=0))
+            ui.show_chart(fig, key="sc_landscape")
+            ui.legend_note("Open circle: where the method started. Filled marker: where it "
+                           "ended. Dotted: its path, thinned. Every method was given this "
+                           "same curve.")
+    with right:
+        with st.container(border=True):
+            st.markdown(_bh_run("Power held, as a share of the true peak", 15),
+                        unsafe_allow_html=True)
+            ys = list(reversed(methods))
+            figb = go.Figure(go.Bar(
+                y=ys, x=[d["methods"][m]["steady_eff_pct"] for m in ys], orientation="h",
+                marker=dict(color=[ui.method_style(m)["color"] for m in ys]),
+                text=[f"{d['methods'][m]['steady_eff_pct']:.1f}%" for m in ys],
+                textposition="outside", showlegend=False, hoverinfo="skip"))
+            figb.add_vline(x=100, line=dict(color=c["text_muted"], dash="dot", width=1))
+            figb.update_xaxes(range=[0, 114], title_text="tracking efficiency (%)")
+            ui.style_fig(figb, height=380)
+            figb.update_layout(margin=dict(l=8, r=24, t=16, b=40))
+            ui.show_chart(figb, key="sc_bars")
+            ui.legend_note("Steady-state efficiency: the mean of the last quarter of the "
+                           "window over the true peak.")
+
+    df = pd.DataFrame([{
+        "Method": r["method"] + (" · proposed" if r["method"] == PROPOSED else ""),
+        "Role": r["role"],
+        "GMPP reached": "yes" if r["reached"] else "no",
+        "Tracking efficiency (%)": round(r["steady_eff_pct"], 2),
+        "Convergence (steps)": "—" if r["steps"] is None else str(int(r["steps"])),
+        "Readings / evaluations": _fmt(r["readings"], "{:.0f}"),
+        "Power loss (W)": round(r["lost_w"], 1),
+    } for r in rows])
+    st.dataframe(df, hide_index=True, width="stretch")
+    ui.legend_note("Definitions are the harness's, gmppt.tracking.Trajectory.metrics: "
+                   "tracking efficiency is the steady-state mean over the true peak; "
+                   "GMPP reached means that mean is within 1% of the peak; convergence is "
+                   "the first step after which power stays within tolerance, so it is "
+                   "conditional on arrival and a dash otherwise. Readings for P&O and InC "
+                   "are not separately reported; PSO's count is the evaluation budget the "
+                   "benchmark selected on the validation split.")
+
+    got = [m for m in methods if d["methods"][m]["reached"] and m != "Perfect tracker"]
+    missed = [m for m in methods if not d["methods"][m]["reached"]]
+    prop = d["methods"].get(PROPOSED)
+    text = (f"Under this condition ({d['n_peaks']} peak(s)), "
+            + (f"{', '.join(got)} reached the true peak" if got
+               else "no method reached the true peak")
+            + (f"; {', '.join(missed)} stopped on a lower peak." if missed else "."))
+    if prop:
+        text += (f" The proposed method held {prop['steady_eff_pct']:.1f}% of the available "
+                 f"power" + (f", at {SEED_PROBE_COST} readings against {pso_reads} PSO "
+                             f"evaluations per cycle." if pso_reads else "."))
+    ui.callout(text + " One scenario supports no general claim; the comparison over the "
+               "whole validation set is on Results · Static performance.",
+               "What this one scenario shows", "info")
+    with st.container(key="seeall2"):
+        st.page_link(P["compare"], label="The same comparison over the whole validation set →")
+
+    e1, e2 = st.columns(2)
+    e1.download_button("Download table (CSV)", df.to_csv(index=False),
+                       "static_compare_methods.csv", "text/csv", use_container_width=True,
+                       key="sc_csv")
+    e2.download_button("Download figure data (JSON)",
+                       json.dumps({"scenario": (sc or {"example": _run_demo()}),
+                                   "rows": rows, "exploratory": True,
+                                   "definitions": "gmppt.tracking.Trajectory.metrics"},
+                                  indent=2, default=str),
+                       "static_compare_methods.json", "application/json",
+                       use_container_width=True, key="sc_json")
+
 # Snapshot from the validation report (p7 static n=632, p9 convergence). Replace with the
 # harness export once --emit exists; never compute these numbers inside the dashboard.
 _SNAPSHOT = pd.DataFrame([
@@ -3660,9 +3695,12 @@ def page_compare():
     pso = _load_json(p_rel)
     sub = "multi_peak"
     n_sub = ((tc or {}).get("results") or {}).get("P&O", {}).get(sub, {}).get("n")
-    ui.page_intro("Compare methods",
-                  f"Every method on the same {_fmt(n_sub, '{:.0f}')} multi-peak validation "
-                  f"curves.", "Compare · Compare methods")
+    ui.page_intro("Static performance",
+                  f"The validated static result: every method on the same "
+                  f"{_fmt(n_sub, '{:.0f}')} multi-peak validation curves.",
+                  "Results · Static performance")
+    ui.data_chip("Benchmark result", "Read from the phase-2 exports. No interactive run "
+                                     "contributes to any figure on this page.")
 
     if not tc or not require_keys(t_rel, tc, ("results", "split"), "the comparison table"):
         if not tc:
@@ -3899,12 +3937,8 @@ _RELOC_ROWS = ["hybrid, triggered reseed", "hybrid, never reseed", "PSO",
                "PSO, triggered reseed", "seed only", "P&O", "InC"]
 
 
-def page_relocation():
-    c = ui.T()
-    ui.page_intro("Shading relocation",
-                  "One clean relocation event: the tallest peak moves to another "
-                  "substring, and each method has to find it again.",
-                  "Explore · Shading relocation")
+def _relocation_section(c):
+    """The p12 relocation export, as a section of Results · Dynamic performance."""
     rel = "phase2/relocation_comparison_pole.json"
     R = _load_json(rel)
     if not R or not require_keys(rel, R, ("stats", "n_windows"), "the relocation table"):
@@ -4066,9 +4100,11 @@ _TARGETS = {
 
 def page_results():
     c = ui.T()
-    ui.page_intro("Results vs targets",
-                  "Each funded target beside what was measured, and the caveats that "
-                  "belong to it.", "Results · Results vs targets")
+    ui.page_intro("Targets",
+                  "The project's static, dynamic and convergence objectives beside what "
+                  "was measured, and the caveats that belong to each.", "Results · Targets")
+    ui.data_chip("Benchmark result", "Only validated exports populate this page. A target "
+                                     "with no recorded value stays blank.")
 
     t_rel = "phase2/tracker_comparison_val.json"
     d_rel = "phase2/dynamic_comparison_30-100_val.json"
@@ -4192,9 +4228,9 @@ def page_results():
 # =========================================================================== #
 def page_benchset():
     c = ui.T()
-    ui.page_intro("Benchmark scenario set",
-                  "What the benchmark figures were measured on.",
-                  "Results · Benchmark scenario set")
+    ui.page_intro("Benchmark set",
+                  "What the validated results were measured on: the scenario population "
+                  "and the split.", "Data & validation · Benchmark set")
     t_rel = "phase2/tracker_comparison_val.json"
     d_rel = "phase2/dynamic_comparison_30-100_val.json"
     n_rel = "phase2/near_tie_screen.json"
@@ -4252,87 +4288,152 @@ def page_benchset():
     # the footer's Next already goes to Where it comes from — no second link
 
 
-def page_moving():
-    import numpy as np
-    c = ui.T()
-    disp, mono = ui.FONTS["display"], ui.FONTS["mono"]
-    st.markdown(f"<style>.bh{{font-family:{disp};font-weight:700;color:{c['text']};}}"
-                f"</style>", unsafe_allow_html=True)
-    ui.page_intro("Dynamic irradiance",
-                  "How each tracking method responds while the irradiance changes, on the "
-                  "EN 50530 ramp profile.", "Explore · Dynamic irradiance")
-    # ---- irradiance profile + KPIs from the aggregate export ----
-    scen = st.segmented_control("Irradiance profile",
-                                ["EN 50530 · Seq 30-100", "EN 50530 · Seq 10-50",
-                                 "Unshaded control"],
-                                default="EN 50530 · Seq 30-100", key="mv_scen") \
-        or "EN 50530 · Seq 30-100"
-    st.caption("EN 50530 irradiance ramp, stepped on a control-step axis. This is a "
-               "standard ramp profile, not a time-of-day sun path.")
-    seq = "10-50" if "10-50" in scen else "30-100"
-    shaded = "Unshaded" not in scen
+# =========================================================================== #
+# Results · Dynamic performance  — the validated EN 50530 exports (p10) and the
+# relocation export (p12). Static figures only: this is evidence, not a player.
+# =========================================================================== #
+_DYN_ROWS = ["hybrid, no reseed", "seed only, no reseed", "PSO", "P&O", "InC"]
 
+
+def _dynamic_export_block(seq: str, c: dict):
+    """One sequence's validated result: KPIs, the method table, the reseed note.
+    Returns the export (or None) so the caller can stamp provenance."""
     rel = f"phase2/dynamic_comparison_{seq}_val.json"
     dyj = _load_json(rel)
     if not dyj:
-        missing_export(rel, "The dynamic comparison")
-        dyj = None
-    elif not require_keys(rel, dyj, ("results", "split"), "the dynamic KPIs"):
-        dyj = None
+        missing_export(rel, f"The dynamic comparison for Seq {seq}")
+        return None
+    if not require_keys(rel, dyj, ("results", "split"), f"the Seq {seq} dynamic figures"):
+        return None
+    sh = (dyj.get("results") or {}).get("shaded") or {}
+    un = (dyj.get("results") or {}).get("uniform") or {}
+
+    def agg(block, m):
+        return (block.get(m) or {}).get("aggregate_pct")
+
+    def se_of(block, m):
+        return (block.get(m) or {}).get("scenario_se_pct")
+
+    hyb_key = "hybrid, no reseed"
+    hyb, pso_v, po = agg(sh, hyb_key), agg(sh, "PSO"), agg(sh, "P&O")
+    if hyb is None:
+        missing_field(rel, hyb_key, "the headline efficiency")
+    kp = [("Dynamic efficiency", f"{_fmt(hyb, '{:.3f}')}%",
+           f"{method_label(hyb_key)} · ±{_fmt(se_of(sh, hyb_key), '{:.3f}')} · shaded · "
+           f"EN 50530 Seq {dyj.get('sequence', seq)}", "hero")]
+    if hyb is not None and pso_v is not None:
+        kp.append(("vs PSO", f"{hyb - pso_v:+.2f} pt",
+                   f"PSO {_fmt(pso_v, '{:.3f}')}% ±{_fmt(se_of(sh, 'PSO'), '{:.3f}')}"))
+    if hyb is not None and po is not None:
+        kp.append(("vs P&O", f"{hyb - po:+.1f} pt",
+                   f"P&O {_fmt(po, '{:.3f}')}% ±{_fmt(se_of(sh, 'P&O'), '{:.3f}')}"))
+    ui.kpi_row(kp)
+
+    unknown = [k for k in list(sh) + list(un) if k not in _METHOD_LABELS]
+    keys = [k for k in _DYN_ROWS if k in sh or k in un] + sorted(set(unknown))
+    df = pd.DataFrame([{
+        "Method": method_label(k) if k in _METHOD_LABELS else f"{UNKNOWN_VARIANT}: {k}",
+        "Shaded — dynamic efficiency (%)": _fmt(agg(sh, k), "{:.3f}"),
+        "± s.e.": _fmt(se_of(sh, k), "{:.3f}"),
+        "Uniform control (%)": _fmt(agg(un, k), "{:.3f}"),
+        "n": _fmt((sh.get(k) or {}).get("n_trajectories"), "{:.0f}"),
+    } for k in keys])
+    st.dataframe(df, hide_index=True, width="stretch")
+    ui.legend_note(f"Split {dyj.get('split', '—')} · {_fmt(dyj.get('n_shaded'), '{:.0f}')} "
+                   f"shaded and {_fmt(dyj.get('n_uniform'), '{:.0f}')} uniform scenarios · "
+                   f"EN 50530 eq. (5) over scored blocks, aggregated by eq. (7). The "
+                   f"uniform control has one peak, so it shows what the ramp alone does.")
+    if unknown:
+        ui.callout(f"`{rel}` contains {', '.join('`' + str(k) + '`' for k in unknown)}, "
+                   f"which this dashboard's variant table does not know. They are listed "
+                   f"as unknown rather than assigned to a method family.",
+                   "Unrecognised export keys", "caveat")
+
+    rs_key = "hybrid, reseed each block"
+    if rs_key in sh:
+        rs = sh[rs_key]
+        credited = dyj.get("reseed_credited")
+        ui.callout(
+            f"Reseeding at every block boundary scores "
+            f"{_fmt(rs.get('aggregate_pct'), '{:.3f}')}% "
+            f"±{_fmt(rs.get('scenario_se_pct'), '{:.3f}')} against "
+            f"{_fmt(hyb, '{:.3f}')}% for the same hybrid without it, for a probe "
+            f"overhead of {_fmt(rs.get('reseed_probe_overhead_pct'), '{:.2f}')}%. "
+            + ("The benchmark does not credit it." if credited is False else
+               "The benchmark credits it." if credited is True else
+               "Whether it is credited is not recorded."),
+            "Negative result — reseeding each block is not credited", "caveat")
+    return dyj
+
+
+def page_dynamic_perf():
+    c = ui.T()
+    ui.page_intro("Dynamic performance",
+                  "The validated response to changing irradiance: the EN 50530 ramps, and "
+                  "one clean relocation of the peak.", "Results · Dynamic performance")
+    ui.data_chip("Benchmark result", "Read from the phase-2 exports. No interactive run "
+                                     "contributes to any figure on this page.")
+    seq = st.segmented_control("EN 50530 sequence", ["30-100", "10-50"],
+                               default=None if "dp_seq" in st.session_state else "30-100",
+                               key="dp_seq", format_func=lambda s: f"Seq {s}") or "30-100"
+    st.caption("EN 50530 ramps irradiance on a control-step axis. It is a standard test "
+               "profile, not a time-of-day sun path.")
+    dyj = _dynamic_export_block(seq, c)
+    ui.callout("The standard ramps irradiance but barely moves the peak location, so the "
+               "margin over P&O here is largely static trapping carried into a changing "
+               "scene. The relocation family below is where the peak actually moves.",
+               "Read this beside the table", "caveat")
     if dyj:
-        sh = (dyj.get("results") or {}).get("shaded" if shaded else "uniform") or {}
-
-        def agg(m):
-            return (sh.get(m) or {}).get("aggregate_pct")
-
-        def se_of(m):
-            return (sh.get(m) or {}).get("scenario_se_pct")
-
-        hyb_key = "hybrid, no reseed"
-        hyb, pso_v, po = agg(hyb_key), agg("PSO"), agg("P&O")
-        if hyb is None:
-            missing_field(rel, hyb_key, "the headline efficiency")
-        kp = [("Dynamic efficiency", f"{_fmt(hyb, '{:.3f}')}%",
-               f"{method_label(hyb_key)} · ±{_fmt(se_of(hyb_key), '{:.3f}')}"
-               f" · EN 50530 Seq {dyj.get('sequence', seq)}", "hero")]
-        # PSO and P&O carry their own s.e., so a reader can see whether the gap
-        # is separable rather than being shown a bare difference.
-        if hyb is not None and pso_v is not None:
-            kp.append(("vs PSO", f"{hyb - pso_v:+.2f} pt",
-                       f"PSO {_fmt(pso_v, '{:.3f}')}% ±{_fmt(se_of('PSO'), '{:.3f}')}"))
-        if hyb is not None and po is not None:
-            kp.append(("vs P&O", f"{hyb - po:+.1f} pt",
-                       f"P&O {_fmt(po, '{:.3f}')}% ±{_fmt(se_of('P&O'), '{:.3f}')}"))
-        ui.kpi_row(kp)
-
-        rs_key = "hybrid, reseed each block"
-        if rs_key in sh:
-            rs = sh[rs_key]
-            credited = dyj.get("reseed_credited")
-            ui.callout(
-                f"Reseeding at every block boundary scores "
-                f"{_fmt(rs.get('aggregate_pct'), '{:.3f}')}% "
-                f"±{_fmt(rs.get('scenario_se_pct'), '{:.3f}')} against "
-                f"{_fmt(hyb, '{:.3f}')}% for the same hybrid without it, for a probe "
-                f"overhead of {_fmt(rs.get('reseed_probe_overhead_pct'), '{:.2f}')}%. "
-                + ("The benchmark does not credit it." if credited is False else
-                   "The benchmark credits it." if credited is True else
-                   "Whether it is credited is not recorded."),
-                "Negative result — reseeding each block is not credited", "caveat")
-            with st.expander("Technical details", expanded=False):
-                st.markdown(f"- The export records `reseed_credited = {credited}` and "
-                            f"`reseed_probe_overhead_pct = "
-                            f"{rs.get('reseed_probe_overhead_pct')}`.")
+        rel = f"phase2/dynamic_comparison_{seq}_val.json"
         ui.provenance({rel.split('/')[-1]: _export_meta(rel, dyj)})
 
-    # ---- live per-step traces on the fixed demo module ----
-    demo = _mv_demo()
+    st.divider()
+    ui.section_head("Shading relocation",
+                    "one clean event: the tallest peak moves to another substring, and "
+                    "each method has to find it again")
+    _relocation_section(c)
+
+
+# =========================================================================== #
+# The EN 50530 ramp on the SAME panel the static test ran — the live per-step
+# traces (real trackers, validated engine) and their playback (A7). Explanatory:
+# the benchmark figures live on Results · Dynamic performance.
+# =========================================================================== #
+def _en50530_section(c):
+    scen = st.segmented_control("Irradiance profile",
+                                ["EN 50530 · Seq 30-100", "EN 50530 · Seq 10-50",
+                                 "Unshaded control"],
+                                default=None if "mv_scen" in st.session_state
+                                else "EN 50530 · Seq 30-100", key="mv_scen") \
+        or "EN 50530 · Seq 30-100"
+    seq = "10-50" if "10-50" in scen else "30-100"
+    shaded = "Unshaded" not in scen
+    sc = st.session_state.get("scenario_sent")
+    if sc:
+        module, temp, irr = sc["module"], float(sc["temp"]), tuple(_key(sc["irr"]))
+        if any(isinstance(e, tuple) for e in irr):
+            ui.callout("The handed panel carries a part-of-a-section (Leaf) shadow. The "
+                       "ramp harness scales whole sections, so it cannot take this "
+                       "pattern; the built-in example is stepped instead.",
+                       "Pattern not rampable", "limit")
+            demo = _mv_demo()
+            module, temp, irr = demo["module"], demo["temp"], demo["shaded"]
+        else:
+            st.caption(f"Ramping the panel Build system handed over: {module} · "
+                       f"{sc.get('pattern', '')} · {temp:.0f} °C.")
+    else:
+        demo = _mv_demo()
+        module, temp, irr = demo["module"], demo["temp"], demo["shaded"]
+        if not assert_val_modules([module], "The ramp"):
+            return
+        st.caption(f"Nothing sent from Scenario yet, so the built-in example module "
+                   f"{module} is stepped through the ramp.")
     try:
-        day = _dynamic_day(seq, shaded, demo["module"], demo["temp"], demo["shaded"])
+        day = _dynamic_day(seq, shaded, module, temp, irr)
     except Exception as e:
         ui.unavailable("Trace unavailable",
                        "The per-step traces for this profile could not be computed, so "
-                       "nothing is drawn below. The benchmark figures above are unaffected.",
+                       "nothing is drawn below.",
                        f"- `_dynamic_day` raised `{type(e).__name__}: {e}`", kind="limit")
         return
     if not day.get("has_model"):
@@ -4349,8 +4450,10 @@ def page_moving():
                    if m in day["traces"]]
     default = [m for m in ("Hybrid (bounded)", "P&O") if m in all_methods] or all_methods[:1]
     sel = st.segmented_control("Show", all_methods, selection_mode="multi",
-                               default=default, key="mv_show") or default
-    mode = st.segmented_control("mode", ["Power", "Efficiency %"], default="Power",
+                               default=None if "mv_show" in st.session_state else default,
+                               key="mv_show") or default
+    mode = st.segmented_control("mode", ["Power", "Efficiency %"],
+                                default=None if "mv_mode" in st.session_state else "Power",
                                 key="mv_mode", label_visibility="collapsed") or "Power"
 
     def trim(a):
@@ -4365,9 +4468,9 @@ def page_moving():
         fig = go.Figure()
         if mode == "Power":
             fig.add_trace(go.Scatter(x=xs, y=trim(unshaded), name="unshaded potential",
-                          line=dict(color="#B5641A", width=2, dash="dot")))
+                          line=dict(color=ui.REF_COLORS["unshaded"], width=2, dash="dot")))
             fig.add_trace(go.Scatter(x=xs, y=trim(avail), name="available at true peak",
-                          line=dict(color="#2B3238", width=2.5)))
+                          line=dict(color=ui.REF_COLORS["available"], width=2.5)))
             for m in sel:
                 fig.add_trace(go.Scatter(x=xs, y=trim(np.array(day["traces"][m])), name=m,
                               line=dict(width=2, **ui.method_style(m))))
@@ -4376,7 +4479,7 @@ def page_moving():
         else:
             eff = lambda a: np.where(avail > 1e-9, 100 * a / avail, 100.0)
             fig.add_trace(go.Scatter(x=xs, y=trim(np.full_like(avail, 100.0)),
-                          name="available", line=dict(color="#2B3238", width=2)))
+                          name="available", line=dict(color=ui.REF_COLORS["available"], width=2)))
             for m in sel:
                 fig.add_trace(go.Scatter(x=xs, y=trim(eff(np.array(day["traces"][m]))), name=m,
                               line=dict(width=2, **ui.method_style(m))))
@@ -4384,7 +4487,7 @@ def page_moving():
                          y_title="tracking efficiency (%)")
             fig.update_yaxes(range=[60, 101])
         fig.update_layout(legend=dict(orientation="h", y=1.08, x=0))
-        ui.show_chart(fig)
+        ui.show_chart(fig, key="mv_power")
 
     with st.container(border=True):
         st.markdown(f"<span class='bh' style='font-size:17px'>Power lost to tracking</span>"
@@ -4399,44 +4502,33 @@ def page_moving():
         ui.style_fig(fig2, height=170, x_title="EN 50530 profile (control steps)",
                      y_title="power lost (W)")
         fig2.update_layout(legend=dict(orientation="h", y=1.15, x=0))
-        ui.show_chart(fig2)
+        ui.show_chart(fig2, key="mv_loss")
 
     ui.callout("The x-axis is the EN 50530 ramp profile (control steps), not a clock. The "
                "standard ramps irradiance but barely moves the peak location, so the margin "
                "over P&O is largely static trapping carried into a changing scene.",
                "Read this beside the traces", "caveat")
-
-    # ---- A7: the same traces, played through ----
     st.divider()
     _a7_profile_playback(day, sel, seq, shaded, c)
-    st.divider()
-
-    _your_day(c)
-
-    ui.not_built("Dragging events on a timeline",
-                 "Events are timed with the sliders on Understand · The panels, one event at "
-                 "a time. Dragging an event along a timeline, and resizing it by its "
-                 "edges, needs a drag-and-drop control this dashboard does not have "
-                 "yet. Animated playback of a day run is available above, under Your day.")
 
 
 # =========================================================================== #
 # A7 — EN 50530 profile playback  (Update 3 §5.3, user §12)
 #
-# Explanatory only. It replays the per-step traces `_dynamic_day` computed for
-# the fixed demo module; the headline KPIs above come from the phase-2 export
+# Explanatory only. It replays the per-step traces `_dynamic_day` computed; the
+# benchmark KPIs on Results · Dynamic performance come from the phase-2 export
 # and are neither read nor written here. Building or playing this animation
-# cannot change a single figure on the page — T32 checks exactly that.
+# cannot change a single benchmark figure — T32 checks exactly that.
 # =========================================================================== #
 def _a7_profile_playback(day, sel, seq, shaded, c):
     import numpy as np
     ui.section_head("Play the profile",
                     "the same traces above, one control step at a time")
-    ui.anim_badge("live", f"EN 50530 Seq {seq} · demo module · validated engine")
-    ui.callout("This plays the per-step traces for one demo module so the shape of "
-               "the response is visible. The efficiency figures at the top of the "
-               "page are the benchmark result over the whole validation split and "
-               "are not affected by anything here.",
+    ui.anim_badge("live", f"EN 50530 Seq {seq} · this panel · validated engine")
+    ui.callout("This plays the per-step traces for one panel so the shape of the "
+               "response is visible. The efficiency figures on Results · Dynamic "
+               "performance are the benchmark result over the whole validation split "
+               "and are not affected by anything here.",
                "Explanatory, not the benchmark number", "caveat")
 
     methods = [m for m in sel if m in day.get("traces", {})]
@@ -4482,19 +4574,19 @@ def _a7_profile_playback(day, sel, seq, shaded, c):
 
     static = [go.Scatter(x=x, y=[float(v) for v in unsh[:n]], mode="lines",
                          name="unshaded potential",
-                         line=dict(color="#B5641A", width=2, dash="dot")),
+                         line=dict(color=ui.REF_COLORS["unshaded"], width=2, dash="dot")),
               go.Scatter(x=x, y=[float(v) for v in avail[:n]], mode="lines",
                          name="available at true peak",
-                         line=dict(color="#2B3238", width=2.5))]
+                         line=dict(color=ui.REF_COLORS["available"], width=2.5))]
     series = {m: {"color": ui.method_style(m)["color"],
                   "symbol": _A1_SYMBOLS.get(m.split(" (")[0], "circle")}
               for m in methods}
     held = {m: 100.0 * float(np.sum(tr[m][:n])) / max(1e-9, float(np.sum(avail[:n])))
             for m in methods}
     caption = ("; ".join(f"{m} holds {held[m]:.2f}% of the available power over this "
-                         f"demo profile" for m in methods)
-               + f". {len(key) - 2} ramp corner(s) are marked. These are one module's "
-                 f"trace, not the split-wide benchmark figure above.")
+                         f"profile" for m in methods)
+               + f". {len(key) - 2} ramp corner(s) are marked. These are one panel's "
+                 f"trace, not the split-wide benchmark figure.")
 
     if not ui.anim_on():
         ui.callout("Animations are off, so the ramp corners are shown as stills.",
@@ -4521,128 +4613,725 @@ def _a7_profile_playback(day, sel, seq, shaded, c):
                           static_traces=static, series=series, key="a7-keys")
     measured = ui.anim_exports(fig, frames,
                                {"badge": "live illustration",
-                                "detail": f"EN 50530 Seq {seq}, one demo module",
+                                "detail": f"EN 50530 Seq {seq}, one panel",
                                 "shaded": bool(shaded), "stride": stride},
                                key="a7", name="profile_playback")
     ui.anim_budget_note(measured, stride, build_s)
 
 
-def _your_day(c):
-    """The event-based day run: exploratory, ungated, and labelled as such.
-
-    It lives here so it sits beside the gated EN 50530 result and cannot be
-    mistaken for it. The events themselves are built on Understand · The panels.
-    """
-    import numpy as np
-    with st.expander("Your day — event-based run (exploratory, not a benchmark)",
-                     expanded=False):
-        st.markdown('<div class="gm-sandbox"><b>Exploratory</b>'
-                    '<span>Not a benchmark result and not gated: an arbitrary event '
-                    'timeline you built, not a declared scenario set. No figure from '
-                    'here belongs beside a thesis number.</span></div>',
-                    unsafe_allow_html=True)
-        events = st.session_state.get("day_events") or []
-        ctx = st.session_state.get("day_context") or {}
-        if not events or not ctx:
-            ui.callout("Build a day on Understand · The panels — add events, set their timing "
-                       "and motion — then come back here to run them.",
-                       "No day events yet", "info")
-            st.page_link(P["panels"], label="Build a day on The panels →")
-            return
-        st.caption(f"{len(events)} event(s) on {ctx.get('module', '—')} · "
-                   f"{ctx.get('temp', '—')} °C · peak sun {ctx.get('base_G', '—')} W/m².")
-        if not st.button("Run the whole day through the trackers", key="yourday_run",
-                         type="primary"):
-            st.session_state.setdefault("day_ran", False)
-        else:
-            st.session_state["day_ran"] = True
-        if not st.session_state.get("day_ran"):
-            return
-
-        evkey = tuple((e["kind"], round(e["t0"], 3), round(e["t1"], 3),
-                       e.get("motion", "fixed in place")) for e in events)
-        try:
-            day = _day_run(ctx["module"], ctx["temp"], ctx["base_G"], evkey)
-        except Exception as e:
-            ui.unavailable("Day run unavailable",
-                           "Your day could not be run through the trackers, so nothing "
-                           "is shown here. The EN 50530 figures above are unaffected.",
-                           f"- `_day_run` raised `{type(e).__name__}: {e}`", kind="limit")
-            return
-        if not day.get("has_model"):
-            ui.callout("The trained seed is not loadable, so no hybrid trace is shown "
-                       "below. The classical trackers are real.",
-                       "Hybrid unavailable", "limit")
-
-        g2 = day.get("g2") or {}
-        tone = "info" if g2.get("passed") == g2.get("total") else "limit"
-        ui.callout(f"Curve-integrity check (G2): {g2.get('passed')}/{g2.get('total')} "
-                   f"slices reproduce their own p_gmpp at v_gmpp within "
-                   f"{g2.get('tol')}; worst relative error "
-                   f"{_fmt(g2.get('worst_rel'), '{:.2e}')}.",
-                   "Per-slice gate", tone)
-
-        t = np.array(day["t"])
-        figd = go.Figure()
-        figd.add_trace(go.Scatter(x=t, y=day["unshaded"], name="unshaded potential",
-                                  line=dict(color=ui.REF_COLORS["unshaded"],
-                                            dash="dot", width=2)))
-        figd.add_trace(go.Scatter(x=t, y=day["avail"], name="available at true peak",
-                                  line=dict(color=ui.REF_COLORS["available"], width=2.5)))
-        for m, ph in day["methods"].items():
-            figd.add_trace(go.Scatter(x=t, y=ph, name=m,
-                                      line=dict(width=2, **ui.method_style(m))))
-        figd.add_vline(x=st.session_state.get("day_time", 15.0),
-                       line=dict(color=c["amber"], width=1.5, dash="dot"))
-        ui.style_fig(figd, height=300, x_title="time of day (h)", y_title="power (W)")
-        figd.update_layout(legend=dict(orientation="h", y=1.1, x=0))
-        ui.show_chart(figd, key="yourday_power")
-        cells = "".join(f"<span style='font-weight:500'>{_e(m)}</span>"
-                        f"<span>{v:.2f}%</span>" for m, v in day["energy"].items())
-        st.markdown(f"<div class='bmono' style='display:grid;"
-                    f"grid-template-columns:1fr .7fr;gap:6px 14px;max-width:360px;"
-                    f"font-size:13px'><span style='color:{c['text_muted']}'>method</span>"
-                    f"<span style='color:{c['text_muted']}'>energy captured</span>"
-                    f"{cells}</div>", unsafe_allow_html=True)
-        ui.legend_note(f"{day.get('slices')} irradiance slices over a sun-arc profile with "
-                       f"your events. A drifting shadow sweeps continuously across the "
-                       f"strips; it does not jump between them.")
-
-        # A5 and A6 replay this same run. They add no calculation of their own.
-        st.divider()
-        _a5_day_curves(day, c)
-        st.divider()
-        _a6_day_tracker(day, c)
-
-
 # =========================================================================== #
-# A5 — Day curve playback   ·   A6 — Your Day tracker playback
-#   (Update 3 §5.3, user §11)
+# Dynamic test · Timeline
 #
-# Both replay `_day_run`'s own output. The curves, the trajectories, the
-# available-power reference and the per-slice G2 verdicts were all computed by
-# the day run; these two functions only draw them. A slice that FAILED G2 is
-# drawn like any other and marked, because dropping it would quietly improve a
-# picture of an exploratory result. Both carry the exploratory badge the run
-# itself carries.
+# The PV SYSTEM is inherited from the SENT scenario and never rebuilt here. The
+# page adds G(t), T(t) and Shade(t) in canonical minutes, previews the system
+# at the playhead through the one state function (gmppt_timeline.state_at),
+# and writes `dynamic_scenario` — the record Tracker response and Energy run.
 # =========================================================================== #
-def _a5_day_curves(day, c):
+def _tl_inherit():
+    """(sent, system, system_hash), or (None, None, None) after saying why."""
+    sent = st.session_state.get("scenario_sent")
+    draft = st.session_state.get("scenario_draft")
+    if not sent:
+        ui.callout("The dynamic test runs on the PV system you send from Scenario · "
+                   "Build system. Nothing has been sent yet.", "No system sent", "info")
+        if draft and draft.get("system"):
+            if st.button("Send the scenario you are editing", key="tl_send_draft",
+                         type="primary"):
+                _send_scenario()
+                st.rerun()
+        st.page_link(P["panels"], label="Build the system →")
+        return None, None, None
+    if not sent.get("system") or not sent.get("system_hash"):
+        ui.callout("The sent scenario predates the PV-system record, so the timeline "
+                   "cannot inherit a topology from it. Send it again from Build system.",
+                   "Older scenario record", "limit")
+        st.page_link(P["panels"], label="Go to Build system →")
+        return None, None, None
+    return sent, sent["system"], sent["system_hash"]
+
+
+def _tl_playhead_minutes(key="tl_time", default=900) -> int:
+    v = st.session_state.get(key)
+    try:
+        return int(scn.time_to_minutes(v)) if v is not None else int(default)
+    except Exception:
+        return int(default)
+
+
+def _tl_add(kind, target_uid):
+    """on_click: a new event starting at the playhead."""
+    st.session_state.setdefault("tl_events", [])
+    start, end = tl.window_from_minutes(_tl_playhead_minutes())
+    st.session_state["tl_events"].append(tl.new_event(kind, target_uid, start, end))
+    st.session_state.pop("a5_built", None)
+    st.session_state.pop("a6_built", None)
+
+
+def _tl_remove(uid):
+    ev = st.session_state.get("tl_events") or []
+    st.session_state["tl_events"] = [e for e in ev if e.get("uid") != uid]
+    for k in list(st.session_state.keys()):
+        if str(k).startswith("tlw_") and str(k).endswith(f"_{uid}"):
+            st.session_state.pop(k, None)
+
+
+def _tl_clear():
+    for e in st.session_state.get("tl_events") or []:
+        _tl_remove(e.get("uid"))
+    st.session_state["tl_events"] = []
+
+
+def _tl_event_editor(events, by_uid, n_panels, c):
+    """The per-event controls. Widgets are keyed by the event's uid (prefix
+    tlw_), so each event keeps its own settings; the event dict is rebuilt from
+    the widgets on every run. Canonical minutes in, canonical minutes out."""
+    import datetime as _dt
+    t_lo, t_hi = scn.minutes_to_time(tl.DAY_START), scn.minutes_to_time(tl.DAY_END)
+    for ev in list(events):
+        uid = ev["uid"]
+        with st.container(border=True):
+            hd = st.columns([3, 0.6], vertical_alignment="center")
+            hd[0].markdown(f"**{_e(tl.event_label(ev, by_uid))}**"
+                           + (f"  <span style='font-size:11.5px;color:{c['text_muted']}'>"
+                              f"converted from “{_e(ev['migrated_from'])}”</span>"
+                              if ev.get("migrated_from") else ""), unsafe_allow_html=True)
+            hd[1].button("Remove", key=f"tl_rm_{uid}", on_click=_tl_remove, args=(uid,),
+                         use_container_width=True)
+            st.session_state.setdefault(f"tlw_win_{uid}",
+                                        (scn.minutes_to_time(ev["start"]),
+                                         scn.minutes_to_time(ev["end"])))
+            w = st.slider("Window", min_value=t_lo, max_value=t_hi,
+                          step=_dt.timedelta(minutes=15), key=f"tlw_win_{uid}",
+                          help="When the shadow is on the panel. Minutes after midnight, "
+                               "the same clock as Build system.")
+            s, e = int(scn.time_to_minutes(w[0])), int(scn.time_to_minutes(w[1]))
+            if e <= s:
+                e = min(tl.DAY_END, s + 15)
+            ev["start"], ev["end"] = s, e
+            a, b = st.columns(2)
+            st.session_state.setdefault(f"tlw_light_{uid}", int(round(ev.get("light_pct", 30))))
+            ev["light_pct"] = float(a.slider("Light left under it", 0, 100, step=5,
+                                             format="%d%%", key=f"tlw_light_{uid}",
+                                             help="Of the sunlight at that moment. Lower is "
+                                                  "darker."))
+            opts = tl.motions_for(ev["kind"])
+            if st.session_state.get(f"tlw_mot_{uid}") not in opts:
+                st.session_state[f"tlw_mot_{uid}"] = (ev.get("motion") if ev.get("motion") in opts
+                                                      else opts[0])
+            ev["motion"] = b.selectbox("Motion", opts, key=f"tlw_mot_{uid}",
+                                       help="Fixed: the same shadow throughout. Drifts: the "
+                                            "shadow moves from one position to the other "
+                                            "over the window. Deepens: it darkens from "
+                                            "nothing to the set darkness.")
+            whole = ev["kind"] in tl.WHOLE_PANEL_SHAPES
+            p1, p2 = st.columns(2)
+            st.session_state.setdefault(f"tlw_pos0_{uid}", int(ev.get("pos_from", 50)))
+            st.session_state.setdefault(f"tlw_pos1_{uid}", int(ev.get("pos_to", 50)))
+            ev["pos_from"] = int(p1.slider("Position" + (" at the start" if ev["motion"].startswith("drifts") else ""),
+                                           0, 100, step=5, format="%d%%", key=f"tlw_pos0_{uid}",
+                                           disabled=whole,
+                                           help="Left to right across the panel: which "
+                                                "section the shadow lands on. A cloud or "
+                                                "dirt covers the whole panel."))
+            ev["pos_to"] = int(p2.slider("Position at the end", 0, 100, step=5, format="%d%%",
+                                         key=f"tlw_pos1_{uid}",
+                                         disabled=whole or not ev["motion"].startswith("drifts"),
+                                         help="Where the shadow has drifted to when the "
+                                              "event ends."))
+
+
+def _tl_preview(system, events, t_min, peak, t_dawn, t_noon, tracked, c, key="tl"):
+    """The system at one instant, drawn from ONE state — the same function the
+    run reads. Returns the state."""
+    stt = tl.state_at(system, events, t_min, peak, t_dawn, t_noon, _gcfg.N_SUBSTRINGS)
+    entry = tl.entry_for(stt, system, tracked["uid"])
+    n_sub = _gcfg.N_SUBSTRINGS
+    det = _sim(system["module"], _key(entry), float(stt["temp_c"]))
+    uns = _sim(system["module"], _key([float(stt["sun_G"])] * n_sub), float(stt["temp_c"]))
+    by_uid = {p["uid"]: p for p in system["panels"]}
+    shapes_here = [sh["shape"] for sh in stt["shadows"].get(tracked["uid"], [])]
+    active_names = [tl.event_label(ev, by_uid) for ev in events if ev["uid"] in stt["active"]]
+    ui.kpi_row([
+        ("Sunlight", f"{stt['sun_G']:.0f} W/m²", "clear-sky arc × the peak you set"),
+        ("Cell temperature", f"{stt['temp_c']:.0f} °C", "rises with the sun"),
+        ("Active shadows", str(len(stt["active"])),
+         ", ".join(active_names)[:60] if active_names else "none at this moment"),
+        ("Peaks on the tracked panel", str(det["n_peaks"]),
+         f"true peak {det['gmpp']['P']:.0f} W of {uns['gmpp']['P']:.0f} W unshaded"),
+    ])
+    a, b, d = st.columns([0.9, 1.15, 1.35], gap="medium")
+    with a:
+        st.markdown(f"<div class='bh'>{_e(tracked['display_id'])} · the tracked panel</div>",
+                    unsafe_allow_html=True)
+        st.markdown(scn.module_face_svg(entry, stt["sun_G"], c, False,
+                                        " + ".join(shapes_here).lower() if shapes_here else "None",
+                                        width=170), unsafe_allow_html=True)
+    with b:
+        if len(system["panels"]) > 1:
+            st.markdown("<div class='bh'>The system now</div>", unsafe_allow_html=True)
+            ui.show_chart(scn.topology_figure(system, stt["shaded_uids"], tracked["uid"], {},
+                                              c, False), key=f"{key}_topo")
+            st.caption("Shaded panels are tinted; the tracked panel is outlined.")
+        else:
+            st.markdown("<div class='bh'>The system now</div>", unsafe_allow_html=True)
+            st.caption("One panel. Add panels on Build system and the wiring appears here.")
+    with d:
+        st.markdown("<div class='bh'>The curve now</div>", unsafe_allow_html=True)
+        fig = go.Figure()
+        if abs(uns["gmpp"]["P"] - det["gmpp"]["P"]) > 1e-6:
+            fig.add_trace(go.Scatter(x=uns["V"], y=uns["P"], name="no shadow",
+                                     line=dict(color=ui.REF_COLORS["unshaded"], width=2,
+                                               dash="dot")))
+        fig.add_trace(go.Scatter(x=det["V"], y=det["P"], name="now",
+                                 line=dict(color=c["teal"], width=3)))
+        ui.mark_gmpp(fig, det["gmpp"]["V"], det["gmpp"]["P"],
+                     textposition="top left" if det["gmpp"]["V"] > 0.7 * (det["voc"] or 1.0)
+                     else "top right")
+        ui.mark_local_peaks(fig, [(v, i, pw) for (v, i, pw) in det["peaks"]
+                                  if abs(pw - det["gmpp"]["P"]) > 1e-6])
+        fig.update_yaxes(range=[0, 1.18 * max(float(max(det["P"])), float(max(uns["P"])))])
+        ui.style_fig(fig, height=250, x_title="Voltage (V)", y_title="Power (W)")
+        fig.update_layout(showlegend=False, margin=dict(l=48, r=10, t=10, b=40))
+        ui.show_chart(fig, key=f"{key}_pv")
+    return stt
+
+
+def page_timeline():
+    import datetime as _dt
+    c = ui.T()
+    disp, mono = ui.FONTS["display"], ui.FONTS["mono"]
+    st.markdown(f"<style>.bh{{font-family:{disp};font-weight:700;color:{c['text']};font-size:15px;}}"
+                f".bmono,.bmono *{{font-family:{mono};}}"
+                f".gm-status{{font-family:{mono};font-size:12.5px;margin:6px 0;}}</style>",
+                unsafe_allow_html=True)
+    ui.page_intro("Timeline",
+                  "The same PV system, with sunlight, temperature and shading that change "
+                  "through the day.", "Dynamic test · Timeline")
+    sent, system, sys_hash = _tl_inherit()
+    if not system:
+        return
+    panels = system["panels"]
+    by_uid = {p["uid"]: p for p in panels}
+    ids = [p["display_id"] for p in panels]
+    by_id = {p["display_id"]: p for p in panels}
+    n_panels = len(panels)
+    cond = sent.get("static_condition") or {}
+
+    # ---- inherit, migrate, and detect a rebuilt system ------------------------
+    st.session_state.setdefault("tl_events", [])
+    if not st.session_state["tl_events"] and st.session_state.get("day_events"):
+        focus_uid = (sent.get("focus_panel") or {}).get("uid") or panels[0]["uid"]
+        st.session_state["tl_events"] = tl.migrate_legacy_events(
+            st.session_state.pop("day_events"), focus_uid, n_panels)
+        st.toast("Day events from an earlier session were converted to the timeline.")
+    events = st.session_state["tl_events"]
+    prev = st.session_state.get("dynamic_scenario")
+    if prev and prev.get("base_system_hash") != sys_hash:
+        gone = [e for e in events if e["target"] != tl.ALL_PANELS and e["target"] not in by_uid]
+        for e in gone:
+            _tl_remove(e["uid"])
+        events = st.session_state["tl_events"]
+        ui.callout(f"The PV system was rebuilt on Scenario after this timeline was made, so "
+                   f"the timeline now runs on the new system. "
+                   f"{len(gone)} event(s) aimed at panels that no longer exist were removed; "
+                   f"the rest were kept.", "System changed — timeline reviewed", "caveat")
+    model_label = str(st.session_state.get("gm_panel") or system["module"]).split(" · ")[0]
+    ui.callout(f"Inherited from Build system: {model_label} · {system['n_series']}S × "
+               f"{system['n_parallel']}P · {n_panels} panel{'s' if n_panels != 1 else ''} · "
+               f"system {sys_hash}. The topology is not editable here; change it on Build "
+               f"system and send again.", "The PV system", "info")
+
+    left, right = st.columns([0.9, 1.7], gap="large")
+    with left:
+        with st.container(border=True):
+            st.markdown("<div class='bh'>1 · Sun and temperature</div>", unsafe_allow_html=True)
+            st.session_state.setdefault("tl_peak", int(cond.get("base_irradiance", 910) or 910))
+            peak = int(st.number_input("Peak sunlight at noon (W/m²)", 100, 1200, step=10,
+                                       key="tl_peak",
+                                       help="G(t) is a clear-sky arc from 06:00 to 18:00 "
+                                            "scaled to this peak."))
+            t1, t2 = st.columns(2)
+            st.session_state.setdefault("tl_tdawn", 25)
+            st.session_state.setdefault("tl_tnoon", int(cond.get("temperature_c", 43) or 43))
+            t_dawn = int(t1.number_input("Cell °C at dawn", -10, 80, step=1, key="tl_tdawn"))
+            t_noon = int(t2.number_input("Cell °C at noon", -10, 80, step=1, key="tl_tnoon",
+                                         help="T(t) rises from the dawn value to this one on "
+                                              "the same arc as the sun."))
+        with st.container(border=True):
+            st.markdown("<div class='bh'>2 · Tracked panel</div>", unsafe_allow_html=True)
+            focus_id = (sent.get("focus_panel") or {}).get("display_id") or ids[0]
+            if st.session_state.get("tl_panel") not in ids:
+                st.session_state["tl_panel"] = focus_id if focus_id in ids else ids[0]
+            tracked_id = st.selectbox("Panel the trackers run on", ids, key="tl_panel",
+                                      help="By default the panel Build system handed to the "
+                                           "static test (the most shaded one). Every tracker "
+                                           "runs on this panel's curve.")
+            tracked = by_id[tracked_id]
+        with st.container(border=True):
+            st.markdown("<div class='bh'>3 · Add a shading event</div>", unsafe_allow_html=True)
+            kinds = [k for k in tl.EVENT_SHAPES if k != "Leaf" or n_panels == 1]
+            if st.session_state.get("tl_kind") not in kinds:
+                st.session_state["tl_kind"] = kinds[0]
+            kind = st.selectbox("What casts it", kinds, key="tl_kind",
+                                help=scn.SHAPE_HELP.get(st.session_state.get("tl_kind", kinds[0]), ""))
+            whole = kind in tl.WHOLE_PANEL_SHAPES
+            if st.session_state.get("tl_target") not in ids:
+                st.session_state["tl_target"] = tracked_id
+            target_id = st.selectbox("On which panel", ids, key="tl_target", disabled=whole,
+                                     help="A cloud or dirt covers every panel.")
+            st.button("Add at the playhead", key="tl_add", type="primary", use_container_width=True,
+                      on_click=_tl_add, args=(kind, tl.ALL_PANELS if whole else by_id[target_id]["uid"]),
+                      help=f"Adds a {tl.DEFAULT_EVENT_MINUTES}-minute event starting at the "
+                           f"playhead. Edit its window, darkness, position and motion below.")
+            if n_panels > 1:
+                st.caption("Leaf (part of one section) is available on a single panel only.")
+
+    with right:
+        st.session_state.setdefault("tl_time", scn.minutes_to_time(
+            int(cond.get("time_minutes", 900) or 900)))
+        ph = st.slider("Playhead", min_value=scn.minutes_to_time(tl.DAY_START),
+                       max_value=scn.minutes_to_time(tl.DAY_END),
+                       step=_dt.timedelta(minutes=15), key="tl_time",
+                       help="The moment previewed below. New events start here.")
+        t_min = int(scn.time_to_minutes(ph))
+        changes = tl.change_points(events, tl.sample_times(tl.DEFAULT_SLICES))
+        ui.show_chart(tl.timeline_figure(events, t_min, peak, t_dawn, t_noon, by_uid,
+                                         ui.EVENT_COLORS | {"Pole": "#F0C68A", "Tree": "#A9C79F",
+                                                            "Dirt": "#E9A08C", "Leaf": "#8FA0A6",
+                                                            "Cloud": "#C2BFB6"},
+                                         c, changes), key="tl_fig")
+        with st.expander(f"Events — {len(events)} on the timeline", expanded=bool(events)):
+            if not events:
+                st.caption("No shading events yet. Pick a shape on the left and add one at "
+                           "the playhead.")
+            _tl_event_editor(events, by_uid, n_panels, c)
+            if events:
+                st.button("Clear all events", key="tl_clear", on_click=_tl_clear)
+
+    # ---- the system at the playhead: one state, one drawing --------------------
+    st.space(size="small")
+    ui.section_head(f"At {tl.hhmm(t_min)}",
+                    "what the system sees, and what the tracked panel's curve looks like")
+    _tl_preview(system, events, t_min, peak, t_dawn, t_noon, tracked, c, key="tl")
+    ui.engine_badge("validated")
+
+    # ---- the record --------------------------------------------------------------
+    dscn = tl.build_dynamic_scenario(system, sys_hash, tracked, peak, t_dawn, t_noon, events)
+    st.session_state["dynamic_scenario"] = dscn
+    st.space(size="small")
+    with st.container(border=True):
+        st.markdown("<div class='bh'>4 · Run it</div>", unsafe_allow_html=True)
+        st.markdown(f"<div class='gm-status' style='color:{c['teal']}'>● timeline ready · "
+                    f"{len(events)} event{'s' if len(events) != 1 else ''} · "
+                    f"{tl.DEFAULT_SLICES} slices of {tl.STEPS_PER_SLICE} control steps · "
+                    f"hash {_e(dscn['hash'])}</div>", unsafe_allow_html=True)
+        a, b = st.columns([1.4, 3], vertical_alignment="center")
+        with a:
+            with st.container(key="next-tlrun"):
+                if st.button("Run the timeline through the trackers →", key="tl_run",
+                             type="primary", use_container_width=True):
+                    st.switch_page(P["tracker_response"])
+        b.markdown(f"<span style='color:{c['text_muted']};font-size:0.9rem'>P&O, InC, PSO "
+                   f"and the proposed method each step through this same day on "
+                   f"{_e(tracked_id)}. Exploratory — your timeline, not a benchmark.</span>",
+                   unsafe_allow_html=True)
+
+    with st.expander("Use an instant of this timeline in the Sandbox", expanded=False):
+        st.caption("Sample the shaded span into 15-minute records. The irradiance and "
+                   "conditions are transferred; the Sandbox uses its own datasheet module "
+                   "and simplified engine — the module is never converted.")
+        samples = tl.sample_records(system, events, peak, t_dawn, t_noon, tracked["uid"],
+                                    str(st.session_state.get("bench_preset", "—")), 15,
+                                    _scenario_hash)
+        if not samples:
+            st.caption("Add a shading event first.")
+        else:
+            sdf = pd.DataFrame([{
+                "Time": x["time_label"], "Sunlight (W/m²)": round(x["base_irradiance_Wm2"]),
+                "Cell °C": round(x["temperature_C"]),
+                "Section irradiance (W/m²)": str([round(v) if not isinstance(v, list)
+                                                  else [round(y) for y in v]
+                                                  for v in x["substring_irradiance_Wm2"]]),
+                "Events": ", ".join(x["active_events"]),
+            } for x in samples])
+            st.dataframe(sdf, hide_index=True, width="stretch")
+            sc_idx = st.selectbox("Instant to load", range(len(samples)),
+                                  format_func=lambda i: samples[i]["time_label"] + " · "
+                                  + ", ".join(samples[i]["active_events"]), key="tl_sample_pick")
+            if st.button("Load this instant into the Simulator", key="tl_load_sim",
+                         use_container_width=True):
+                st.session_state["day_sim_import"] = dict(samples[sc_idx])
+                st.switch_page(P["sim_setup"])
+            import json as _json
+            st.download_button("Download sampled records (JSON)", _json.dumps(samples, indent=2),
+                               "timeline_samples.json", "application/json",
+                               use_container_width=True, key="tl_samples_json")
+
+    with st.expander("Technical details", expanded=False):
+        st.markdown(
+            "- Time is minutes after midnight everywhere on the dynamic pages, the same "
+            "clock as Build system (`gmppt_scenario.time_to_minutes`); 06:00 = 360, "
+            "18:00 = 1080. No fractions of a day.\n"
+            "- G(t) = peak × sin(π · (t − 06:00) / 12 h), never below 1 W/m². "
+            "T(t) = dawn + (noon − dawn) × the same arc.\n"
+            "- A shadow's darkness is a share of the sunlight AT THAT MOMENT; the event's "
+            "record is turned into the engine's entry by `gmppt_scenario.shadow_pattern`, "
+            "the same translation Build system uses. The drawing and the physics both "
+            "read `gmppt_timeline.state_at`, so they cannot disagree. A drifting shadow "
+            "moves section by section, because the validated engine takes one light level "
+            "per section (per cell group for a Leaf).\n"
+            "- Two shadows on one panel combine section by section as the darker one; a "
+            "shadow never brightens a panel.\n"
+            f"- The record carries `base_system_hash = {sys_hash}`. A topology change on "
+            f"Build system is detected against it, not silently applied.\n"
+            "- Events restored from an older session (fractions of the day) are converted "
+            "to minutes and marked as converted.")
+
+
+# =========================================================================== #
+# Dynamic test · Tracker response  and  · Energy
+#
+# Both read ONE run of the dynamic scenario (_timeline_run): real trackers on
+# validated-engine curves, scored by the harness's own DynamicTrajectory.metrics.
+# Every view is driven by the same playhead, and every figure is exploratory.
+# =========================================================================== #
+def _dyn_ready(what="This page"):
+    """The dynamic scenario and its run, or None after saying why."""
+    dscn = st.session_state.get("dynamic_scenario")
+    if not dscn:
+        ui.callout(f"{what} runs the timeline you build on Dynamic test · Timeline. "
+                   f"No timeline has been built yet.", "No timeline yet", "info")
+        st.page_link(P["timeline"], label="Build the timeline →")
+        return None, None
+    sent = st.session_state.get("scenario_sent") or {}
+    if sent.get("system_hash") and sent["system_hash"] != dscn.get("base_system_hash"):
+        ui.callout("The PV system was rebuilt on Scenario after this timeline was made. "
+                   "Open Timeline to review it; until then these traces are for the "
+                   "earlier system.", "System changed", "caveat")
+    if not dscn.get("events"):
+        ui.callout("The timeline has no shading events, so only the sun arc and the "
+                   "temperature change. Add events on Timeline to make the peak move.",
+                   "No shading events", "info")
+    try:
+        run = _timeline_run(_dyn_key(dscn))
+    except Exception as e:
+        ui.unavailable("Run unavailable",
+                       "Your timeline could not be run through the trackers, so nothing "
+                       "is shown here.",
+                       f"- `_timeline_run` raised `{type(e).__name__}: {e}`", kind="limit")
+        return dscn, None
+    return dscn, run
+
+
+def _hours(ts):
+    return [float(t) / 60.0 for t in ts]
+
+
+def _hour_axis(fig, **kw):
+    ticks = list(range(tl.DAY_START, tl.DAY_END + 1, 120))
+    fig.update_xaxes(tickvals=[v / 60.0 for v in ticks], ticktext=[tl.hhmm(v) for v in ticks],
+                     range=[tl.DAY_START / 60.0, tl.DAY_END / 60.0], **kw)
+
+
+def _dyn_methods(run):
+    return [m for m in ("P&O", "InC", "PSO", "Model only", "Hybrid (bounded)")
+            if m in run["methods"]]
+
+
+def page_tracker_response():
+    import datetime as _dt
+    c = ui.T()
+    disp, mono = ui.FONTS["display"], ui.FONTS["mono"]
+    st.markdown(f"<style>.bh{{font-family:{disp};font-weight:700;color:{c['text']};font-size:15px;}}"
+                f".bmono,.bmono *{{font-family:{mono};}}</style>", unsafe_allow_html=True)
+    ui.page_intro("Tracker response",
+                  "The same timeline through P&O, InC, PSO and the proposed method — how "
+                  "quickly and reliably each one recovers the moving peak.",
+                  "Dynamic test · Tracker response")
+    dscn, run = _dyn_ready("Tracker response")
+    if not run:
+        return
+    system, events = dscn["system"], dscn["events"]
+    by_uid = {p["uid"]: p for p in system["panels"]}
+    tracked = by_uid.get(run["tracked"]["uid"]) or run["tracked"]
+    peak, t_dawn, t_noon = (dscn["sun"]["peak_Wm2"], dscn["temperature"]["dawn_C"],
+                            dscn["temperature"]["noon_C"])
+    ui.data_chip("Exploratory", "Your timeline on the validated engine. Scenario-specific; "
+                                "not a benchmark result.")
+    st.caption(f"{tracked.get('display_id', '—')} on {system['module']} · "
+               f"{len(events)} event{'s' if len(events) != 1 else ''} · {run['slices']} "
+               f"slices × {run['steps_per_slice']} control steps · timeline {run['hash']}")
+    if not run.get("has_model"):
+        ui.callout("The trained seed is not loadable, so no hybrid trace is shown. The "
+                   "classical trackers are real.", "Hybrid unavailable", "limit")
+    g2 = run["g2"]
+    ui.callout(f"Curve-integrity check (G2): {g2['passed']}/{g2['total']} slices reproduce "
+               f"their own p_gmpp at v_gmpp within {g2['tol']}; worst relative error "
+               f"{_fmt(g2['worst_rel'], '{:.2e}')}.", "Per-slice gate",
+               "info" if g2["passed"] == g2["total"] else "limit")
+
+    methods = _dyn_methods(run)
+    default = [m for m in ("P&O", "PSO", "Hybrid (bounded)") if m in methods] or methods[:1]
+    sel = st.segmented_control("Show", methods, selection_mode="multi",
+                               default=None if "tr_show" in st.session_state else default,
+                               key="tr_show") or default
+
+    # ---- the one playhead -------------------------------------------------------
+    st.session_state.setdefault("tr_time", scn.minutes_to_time(720))
+    ph = st.slider("Playhead", min_value=scn.minutes_to_time(tl.DAY_START),
+                   max_value=scn.minutes_to_time(tl.DAY_END), step=_dt.timedelta(minutes=5),
+                   key="tr_time", help="Every view below is at this moment.")
+    t_min = int(scn.time_to_minutes(ph))
+    k = _run_step_at(run, t_min)
+    sl = min(k // int(run["steps_per_slice"]), run["slices"] - 1)
+    env = run["slice_env"][sl]
+    cur = run["slice_curves"][sl]
+    avail_k = float(run["avail"][k])
+
+    # fixed KPI positions: the values change, the cards do not move (§27)
+    kp = [("Available at the true peak", f"{avail_k:.0f} W",
+           f"{env['sun_G']:.0f} W/m² · {env['temp_c']:.0f} °C · {cur['n_peaks']} peak(s)", "hero")]
+    for m in sel[:3]:
+        pk = float(run["methods"][m][k])
+        kp.append((m, f"{pk:.0f} W", f"{100 * pk / max(avail_k, 1e-9):.1f}% of available"))
+    ui.kpi_row(kp)
+
+    a, b = st.columns([1, 1.35], gap="medium")
+    with a:
+        st.markdown(f"<div class='bh'>The system at {tl.hhmm(t_min)}</div>", unsafe_allow_html=True)
+        stt = tl.state_at(system, events, t_min, peak, t_dawn, t_noon, _gcfg.N_SUBSTRINGS)
+        shapes_here = [sh["shape"] for sh in stt["shadows"].get(tracked["uid"], [])]
+        f1, f2 = st.columns([0.8, 1.2])
+        f1.markdown(scn.module_face_svg(tl.entry_for(stt, system, tracked["uid"]), stt["sun_G"],
+                                        c, False, " + ".join(shapes_here).lower() if shapes_here
+                                        else "None", width=150), unsafe_allow_html=True)
+        with f2:
+            if len(system["panels"]) > 1:
+                ui.show_chart(scn.topology_figure(system, stt["shaded_uids"], tracked["uid"], {},
+                                                  c, False), key="tr_topo")
+            else:
+                st.caption("One panel; its face is on the left.")
+            names = [tl.event_label(ev, by_uid) for ev in events if ev["uid"] in stt["active"]]
+            st.caption("Active: " + (", ".join(names) if names else "no shadow"))
+    with b:
+        st.markdown(f"<div class='bh'>The curve at {tl.hhmm(t_min)}, and where each tracker sits</div>",
+                    unsafe_allow_html=True)
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(x=cur["V"], y=cur["P"], name="P–V now",
+                                 line=dict(color=c["teal"], width=2.5)))
+        fig.add_trace(go.Scatter(x=[cur["gmpp"]["V"]], y=[cur["gmpp"]["P"]], mode="markers",
+                                 name="true peak", marker=dict(symbol="star", size=15,
+                                                               color=ui.PEAK_COLORS["gmpp"])))
+        for m in sel:
+            fig.add_trace(go.Scatter(x=[run["v_hist"][m][k]], y=[run["methods"][m][k]],
+                                     mode="markers", name=m,
+                                     marker=dict(color=ui.method_style(m)["color"], size=12,
+                                                 symbol=_A1_SYMBOLS.get(m.split(" (")[0], "circle"),
+                                                 line=dict(color="#fff", width=1))))
+        fig.update_yaxes(range=[0, 1.18 * max(float(max(cur["P"])), 1.0)])
+        ui.style_fig(fig, height=290, x_title="terminal voltage  V", y_title="power  W")
+        fig.update_layout(legend=dict(orientation="h", y=1.08, x=0),
+                          margin=dict(l=48, r=10, t=10, b=40))
+        ui.show_chart(fig, key="tr_pv")
+
+    # ---- power over the day, with the changes and the re-convergence points ------
+    with st.container(border=True):
+        st.markdown(f"<span class='bh' style='font-size:17px'>Tracker power over the day</span>"
+                    f"<span style='font-size:13px;color:{c['text_muted']};margin-left:10px'>"
+                    f"the gap to the dotted line is shading; the gap to the dark line is "
+                    f"tracking — only the second is the method's</span>", unsafe_allow_html=True)
+        xs = _hours(run["t"])
+        figd = go.Figure()
+        figd.add_trace(go.Scatter(x=xs, y=run["unshaded"], name="unshaded potential",
+                                  line=dict(color=ui.REF_COLORS["unshaded"], dash="dot", width=2)))
+        figd.add_trace(go.Scatter(x=xs, y=run["avail"], name="available at true peak",
+                                  line=dict(color=ui.REF_COLORS["available"], width=2.5)))
+        for m in sel:
+            figd.add_trace(go.Scatter(x=xs, y=run["methods"][m], name=m,
+                                      line=dict(width=2, **ui.method_style(m))))
+            rc = [r for r in run["reconv"].get(m, []) if r["steps"] is not None]
+            if rc:
+                kk = [min(r["step"] + r["steps"], len(xs) - 1) for r in rc]
+                figd.add_trace(go.Scatter(x=[xs[i] for i in kk], y=[run["methods"][m][i] for i in kk],
+                                          mode="markers", name=f"{m} settled",
+                                          marker=dict(color=ui.method_style(m)["color"], size=10,
+                                                      symbol="diamond-open", line=dict(width=2)),
+                                          showlegend=False,
+                                          hovertemplate=f"{m} settled after %{{text}} steps<extra></extra>",
+                                          text=[str(r["steps"]) for r in rc]))
+        for ch in run["changes"]:
+            figd.add_vline(x=ch["t"] / 60.0, line=dict(color=c["text_faint"], width=1, dash="dot"))
+        if run["changes"]:
+            figd.add_annotation(x=run["changes"][0]["t"] / 60.0, y=1.0, yref="paper", yanchor="bottom",
+                                showarrow=False, text="condition changes (dotted)",
+                                font=dict(size=10, color=c["text_muted"]))
+        figd.add_vline(x=t_min / 60.0, line=dict(color=c["teal"], width=2))
+        ui.style_fig(figd, height=320, y_title="power  W")
+        _hour_axis(figd, title_text="time of day")
+        figd.update_layout(legend=dict(orientation="h", y=1.1, x=0))
+        ui.show_chart(figd, key="tr_power")
+        ui.legend_note("Open diamonds mark where a method settled again after a condition "
+                       "change (the harness's convergence rule on the segment). A method "
+                       "with no diamond after a change never settled before the next one.")
+
+    # ---- the table --------------------------------------------------------------
+    pso_reads, _ = _pso_readings(_load_json("phase2/pso_comparison_val.json"))
+    n_ch = len(run["changes"])
+    rows = []
+    for m in methods:
+        mt = run["metrics"][m]
+        rc = [r["steps"] for r in run["reconv"].get(m, [])]
+        settled = [x for x in rc if x is not None]
+        rows.append({
+            "Method": m + (" · proposed" if m == "Hybrid (bounded)" else ""),
+            "Dynamic efficiency (%)": round(float(mt.get("dynamic_efficiency_pct", float("nan"))), 2),
+            "Energy captured (Wh)": round(run["energy_wh"][m], 1),
+            "Energy lost (Wh)": round(run["available_wh"] - run["energy_wh"][m], 1),
+            "Worst instant loss (W)": round(float(mt.get("worst_instant_loss_w", float("nan"))), 1),
+            "Re-converged": f"{len(settled)} of {n_ch}" if n_ch else "no changes",
+            "Median re-convergence (steps)": (str(int(np.median(settled))) if settled else "—"),
+            "Readings / evaluations": _fmt(pso_reads if m == "PSO"
+                                           else _READINGS_FIXED.get(m.split(" (")[0]), "{:.0f}"),
+            "Reseed / trigger": "none in this variant",
+        })
+    st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
+    ui.legend_note(f"Dynamic efficiency and the energies are DynamicTrajectory.metrics, the "
+                   f"harness's own (EN 50530 eq. 5), over every step of the day. "
+                   f"Re-convergence is the harness's convergence rule (power stays within "
+                   f"{100 * (1 - run['tolerance']):.0f}% of the available power for the rest "
+                   f"of the segment) applied after each of the {n_ch} condition change(s); a "
+                   f"dash is censored, not zero. The hybrid variant run here has no re-seed "
+                   f"trigger, so none can fire. The seed read one cell temperature, at dawn: "
+                   f"{run['seed_temp_c']:.0f} °C.")
+
+    st.divider()
+    _a5_day_curves(run, c)
+    st.divider()
+    _a6_day_tracker(run, c)
+
+    st.divider()
+    with st.expander("The standard ramp (EN 50530) on the same panel", expanded=False):
+        st.caption("The benchmark's own dynamic profile, stepped on the panel Build system "
+                   "handed over. Its split-wide result is on Results · Dynamic performance.")
+        _en50530_section(c)
+
+
+def page_energy():
+    c = ui.T()
+    disp = ui.FONTS["display"]
+    st.markdown(f"<style>.bh{{font-family:{disp};font-weight:700;color:{c['text']};font-size:15px;}}"
+                f"</style>", unsafe_allow_html=True)
+    ui.page_intro("Energy",
+                  "What each method captured over the whole timeline, against what was there.",
+                  "Dynamic test · Energy")
+    dscn, run = _dyn_ready("Energy")
+    if not run:
+        return
+    ui.data_chip("Exploratory", "Your timeline on the validated engine. Scenario-specific; "
+                                "not a benchmark result.")
+    methods = _dyn_methods(run)
+    av_wh, un_wh = run["available_wh"], run["unshaded_wh"]
+    prop = "Hybrid (bounded)" if "Hybrid (bounded)" in methods else None
+    kp = [("Available at the true peak", f"{av_wh:.0f} Wh",
+           f"of {un_wh:.0f} Wh with nothing shading the panel", "hero")]
+    if prop:
+        kp.append(("Proposed method captured", f"{run['energy_wh'][prop]:.0f} Wh",
+                   f"{run['energy'][prop]:.2f}% of available"))
+    if "P&O" in methods:
+        kp.append(("P&O captured", f"{run['energy_wh']['P&O']:.0f} Wh",
+                   f"{run['energy']['P&O']:.2f}% of available"))
+    if prop and "P&O" in methods:
+        kp.append(("Recovered by the proposed method", f"{run['energy_wh'][prop] - run['energy_wh']['P&O']:+.0f} Wh",
+                   "against P&O, over this day"))
+    ui.kpi_row(kp)
+
+    left, right = st.columns([1, 1.25], gap="large")
+    with left:
+        with st.container(border=True):
+            st.markdown("<div class='bh'>Energy captured, as a share of available</div>",
+                        unsafe_allow_html=True)
+            ys = ["Available at true peak"] + list(reversed(methods))
+            xs = [100.0] + [run["energy"][m] for m in reversed(methods)]
+            cols = [ui.REF_COLORS["available"]] + [ui.method_style(m)["color"] for m in reversed(methods)]
+            figb = go.Figure(go.Bar(y=ys, x=xs, orientation="h", marker=dict(color=cols),
+                                    text=[f"{v:.1f}%" for v in xs], textposition="outside",
+                                    showlegend=False, hoverinfo="skip"))
+            figb.update_xaxes(range=[0, 116], title_text="share of the available energy (%)")
+            ui.style_fig(figb, height=320)
+            figb.update_layout(margin=dict(l=8, r=24, t=10, b=40))
+            ui.show_chart(figb, key="en_bars")
+    with right:
+        with st.container(border=True):
+            st.markdown("<div class='bh'>Where the energy was lost</div>", unsafe_allow_html=True)
+            if st.session_state.get("en_show") not in methods:
+                st.session_state["en_show"] = prop or methods[0]
+            m = st.selectbox("Method", methods, key="en_show", label_visibility="collapsed")
+            xs = _hours(run["t"])
+            figl = go.Figure()
+            figl.add_trace(go.Scatter(x=xs, y=run["avail"], name="available at true peak",
+                                      line=dict(color=ui.REF_COLORS["available"], width=2)))
+            figl.add_trace(go.Scatter(x=xs, y=run["methods"][m], name=m, fill="tonexty",
+                                      fillcolor="rgba(163,43,36,0.18)",
+                                      line=dict(width=2, **ui.method_style(m))))
+            for ch in run["changes"]:
+                figl.add_vline(x=ch["t"] / 60.0, line=dict(color=c["text_faint"], width=1, dash="dot"))
+            ui.style_fig(figl, height=320, y_title="power  W")
+            _hour_axis(figl, title_text="time of day")
+            figl.update_layout(legend=dict(orientation="h", y=1.1, x=0))
+            ui.show_chart(figl, key="en_loss")
+            ui.legend_note(f"The shaded area is the power {m} did not capture — the calculated "
+                           f"loss, {av_wh - run['energy_wh'][m]:.0f} Wh over the day.")
+
+    rows = [{"Method": m + (" · proposed" if m == prop else ""),
+             "Captured (Wh)": round(run["energy_wh"][m], 1),
+             "Share of available (%)": round(run["energy"][m], 2),
+             "Lost to tracking (Wh)": round(av_wh - run["energy_wh"][m], 1),
+             "Lost to shading (Wh)": round(un_wh - av_wh, 1)} for m in methods]
+    df = pd.DataFrame(rows)
+    st.dataframe(df, hide_index=True, width="stretch")
+    ui.legend_note(f"E = Σ P·Δt over {run['n_steps']} control steps of "
+                   f"{run['minutes_per_step']:.2f} min each, 06:00–18:00. Lost to shading is "
+                   f"the same for every method: it is the hardware's, not the tracker's.")
+    ui.callout("These are the consequences of one timeline you built. They say what trapping "
+               "and slow recovery cost on this day; they support no general claim. The "
+               "validated dynamic results are on Results · Dynamic performance.",
+               "Exploratory", "caveat")
+    e1, e2 = st.columns(2)
+    e1.download_button("Download table (CSV)", df.to_csv(index=False), "timeline_energy.csv",
+                       "text/csv", use_container_width=True, key="en_csv")
+    import json as _json
+    e2.download_button("Download run (JSON)",
+                       _json.dumps({"dynamic_scenario": dscn, "energy_wh": run["energy_wh"],
+                                    "available_wh": av_wh, "unshaded_wh": un_wh,
+                                    "metrics": run["metrics"], "reconvergence": run["reconv"],
+                                    "changes": run["changes"], "exploratory": True},
+                                   indent=2, default=str),
+                       "timeline_run.json", "application/json", use_container_width=True,
+                       key="en_json")
+
+
+# =========================================================================== #
+# A5 — Day curve playback   ·   A6 — Tracker playback   (Update 3 §5.3, user §11)
+#
+# Both replay `_timeline_run`'s own output. The curves, the trajectories, the
+# available-power reference and the per-slice G2 verdicts were all computed by
+# the run; these two functions only draw them. A slice that FAILED G2 is drawn
+# like any other and marked, because dropping it would quietly improve a
+# picture of an exploratory result.
+# =========================================================================== #
+def _a5_day_curves(run, c):
     """The P–V curve at each time slice, played through the day."""
-    curves = day.get("slice_curves") or []
-    g2 = day.get("slice_g2") or []
+    curves = run.get("slice_curves") or []
+    g2 = run.get("slice_g2") or []
     ui.section_head("The curve through the day", "one frame per irradiance slice")
-    ui.anim_badge("live", "your event timeline · exploratory, not a benchmark")
+    ui.anim_badge("live", "your timeline · exploratory, not a benchmark")
     if not curves:
         ui.unavailable("Slice curves unavailable",
-                       "This day run did not record a curve for each time slice, so "
-                       "there is nothing to play back.",
-                       "- `_day_run` returns `slice_curves`; an older cached run "
-                       "predates it. Re-run the day to rebuild it.")
+                       "This run did not record a curve for each time slice, so there is "
+                       "nothing to play back.", "")
         return
-
     if st.button("▶ Build the day playback", key="a5_build",
-                 help="Plays back the curves this day run already computed. "
-                      "Nothing is re-simulated."):
+                 help="Plays back the curves this run already computed. Nothing is re-simulated."):
         st.session_state["a5_built"] = True
     if not st.session_state.get("a5_built"):
         st.caption("Press ▶ to watch the curve change shape through the day.")
@@ -4656,22 +5345,23 @@ def _a5_day_curves(day, c):
         ok_g2 = (g2[i]["pass"] if i < len(g2) else True)
         if not ok_g2:
             failed.append(i)
-            key_frames.add(i)                     # a failed slice is always shown
+            key_frames.add(i)
         pk = round(float(cur["gmpp"]["P"]), 1)
-        labels.append(f"{cur['t']:05.2f} h — true peak {pk:.0f} W"
+        labels.append(f"{tl.hhmm(cur['t'])} — true peak {pk:.0f} W, {cur.get('n_peaks', '?')} peak(s)"
                       + ("" if ok_g2 else "  ·  G2 FAILED on this slice"))
         if prev_pk is not None and abs(pk - prev_pk) > 0.15 * max(prev_pk, 1e-9):
-            key_frames.add(i)                     # the shape moved sharply
+            key_frames.add(i)
         prev_pk = pk
+    for ch in run.get("changes", []):
+        key_frames.add(int(ch["slice"]))
     key_frames = sorted(key_frames)
     build_s = _time.perf_counter() - t0
 
-    caption = (f"{len(curves)} slices from {curves[0]['t']:.1f} h to "
-               f"{curves[-1]['t']:.1f} h. The true peak runs from "
+    caption = (f"{len(curves)} slices from {tl.hhmm(curves[0]['t'])} to "
+               f"{tl.hhmm(curves[-1]['t'])}. The true peak runs from "
                f"{curves[0]['gmpp']['P']:.0f} W to a maximum of "
                f"{max(x['gmpp']['P'] for x in curves):.0f} W. "
-               + (f"{len(failed)} slice(s) failed the G2 curve-integrity check and "
-                  f"are marked in the playback."
+               + (f"{len(failed)} slice(s) failed the G2 curve-integrity check and are marked."
                   if failed else "Every slice passed the G2 curve-integrity check."))
 
     if not ui.anim_on():
@@ -4681,38 +5371,33 @@ def _a5_day_curves(day, c):
         st.markdown(f'<div class="gm-legend">{_e(caption)}</div>', unsafe_allow_html=True)
         return
 
-    fig = ui.curve_morph(curves, labels, key_frames=key_frames, height=380,
-                         frame_ms=160)
+    fig = ui.curve_morph(curves, labels, key_frames=key_frames, height=380, frame_ms=160)
     ui.show_chart(fig, key="a5_player")
     st.markdown(f'<div class="gm-legend">{_e(caption)}</div>', unsafe_allow_html=True)
     if failed:
-        ui.callout(f"Slices {', '.join(str(i) for i in failed[:10])} failed G2. They "
-                   f"are played back unchanged and labelled — a failed slice is not "
-                   f"removed from an exploratory run.", "Failed slices kept", "limit")
+        ui.callout(f"Slices {', '.join(str(i) for i in failed[:10])} failed G2. They are "
+                   f"played back unchanged and labelled — a failed slice is not removed "
+                   f"from an exploratory run.", "Failed slices kept", "limit")
     with st.expander("Show the marked slices", expanded=False):
         ui.curve_strip(curves, labels, key_frames[:5], key="a5-keys")
-    measured = ui.anim_exports(fig, [{"t": x["t"], "p_gmpp": x["gmpp"]["P"]}
-                                     for x in curves],
+    measured = ui.anim_exports(fig, [{"t": x["t"], "p_gmpp": x["gmpp"]["P"]} for x in curves],
                                {"badge": "live illustration",
-                                "detail": "exploratory day run, validated engine",
+                                "detail": "exploratory timeline run, validated engine",
                                 "stride": 1}, key="a5", name="day_curves")
     ui.anim_budget_note(measured, 1, build_s)
 
 
-def _a6_day_tracker(day, c):
+def _a6_day_tracker(run, c):
     """Where each tracker sat, against the power that was available."""
-    import numpy as np
     ui.section_head("Each tracker through the day",
                     "the power it actually held, against the power that was there")
-    ui.anim_badge("live", "your event timeline · exploratory, not a benchmark")
-    methods = list(day.get("methods") or {})
+    ui.anim_badge("live", "your timeline · exploratory, not a benchmark")
+    methods = _dyn_methods(run)
     if not methods:
-        ui.unavailable("No trajectories recorded",
-                       "This day run has no tracker traces to play back.", "")
+        ui.unavailable("No trajectories recorded", "This run has no tracker traces to play back.", "")
         return
-
     if st.button("▶ Build the tracker playback", key="a6_build",
-                 help="Replays the trajectories this day run already produced."):
+                 help="Replays the trajectories this run already produced."):
         st.session_state["a6_built"] = True
     if not st.session_state.get("a6_built"):
         st.caption("Press ▶ to follow each tracker across the day.")
@@ -4720,17 +5405,19 @@ def _a6_day_tracker(day, c):
 
     import time as _time
     t0 = _time.perf_counter()
-    t = [float(x) for x in day["t"]]
-    avail = [float(x) for x in day["avail"]]
-    n = min(len(t), *(len(day["methods"][m]) for m in methods))
-    sps = int(day.get("steps_per_slice") or 8)
-    g2 = day.get("slice_g2") or []
+    th = _hours(run["t"])
+    avail = [float(x) for x in run["avail"]]
+    n = min(len(th), *(len(run["methods"][m]) for m in methods))
+    sps = int(run.get("steps_per_slice") or tl.STEPS_PER_SLICE)
+    g2 = run.get("slice_g2") or []
     bad_steps = {i for i, s in enumerate(g2) if not s["pass"]}
-
     key = {0, n - 1}
     for i in sorted(bad_steps):
         if i * sps < n:
             key.add(i * sps)
+    for ch in run.get("changes", []):
+        if ch["step"] < n:
+            key.add(int(ch["step"]))
     keep, stride = ui.downsample(n, sorted(key))
     frames = []
     for k in keep:
@@ -4738,36 +5425,31 @@ def _a6_day_tracker(day, c):
         failed = bool(g2) and not g2[sl]["pass"]
         frames.append({
             "step": k,
-            "title": (f"{t[k]:05.2f} h — available {avail[k]:.0f} W"
+            "title": (f"{tl.hhmm(run['t'][k])} — available {avail[k]:.0f} W"
                       + ("  ·  slice failed G2" if failed else "")),
-            "markers": {m: {"V": t[k], "P": float(day["methods"][m][k])}
-                        for m in methods},
-            "trails": {m: [(t[j], float(day["methods"][m][j]))
-                           for j in range(max(0, k - 24), k + 1)]
+            "markers": {m: {"V": th[k], "P": float(run["methods"][m][k])} for m in methods},
+            "trails": {m: [(th[j], float(run["methods"][m][j])) for j in range(max(0, k - 24), k + 1)]
                        for m in methods},
         })
     build_s = _time.perf_counter() - t0
 
-    static = [go.Scatter(x=t[:n], y=day["unshaded"][:n], mode="lines",
-                         name="unshaded potential",
+    static = [go.Scatter(x=th[:n], y=run["unshaded"][:n], mode="lines", name="unshaded potential",
                          line=dict(color=ui.REF_COLORS["unshaded"], dash="dot", width=2)),
-              go.Scatter(x=t[:n], y=avail[:n], mode="lines",
-                         name="available at true peak",
+              go.Scatter(x=th[:n], y=avail[:n], mode="lines", name="available at true peak",
                          line=dict(color=ui.REF_COLORS["available"], width=2.5))]
     series = {m: {"color": ui.method_style(m)["color"],
-                  "symbol": _A1_SYMBOLS.get(m.split(" (")[0], "circle")}
-              for m in methods}
-    energy = day.get("energy") or {}
-    caption = ("; ".join(f"{m} captured {energy.get(m, float('nan')):.2f}% of the "
-                         f"available energy" for m in methods) +
-               f". {len(bad_steps)} of {len(g2)} slices failed G2 and are marked.")
+                  "symbol": _A1_SYMBOLS.get(m.split(" (")[0], "circle")} for m in methods}
+    energy = run.get("energy") or {}
+    caption = ("; ".join(f"{m} captured {energy.get(m, float('nan')):.2f}% of the available "
+                         f"energy" for m in methods)
+               + f". {len(bad_steps)} of {len(g2)} slices failed G2 and are marked; "
+                 f"{len(run.get('changes', []))} condition change(s) are key frames.")
 
     if not ui.anim_on():
         ui.callout("Animations are off, so the marked moments are shown as stills.",
                    "Static view", "info")
         ui.snapshot_strip(frames, list(range(min(4, len(frames)))),
-                          captions=[frames[i]["title"]
-                                    for i in range(min(4, len(frames)))],
+                          captions=[frames[i]["title"] for i in range(min(4, len(frames)))],
                           static_traces=static, series=series, key="a6")
         st.markdown(f'<div class="gm-legend">{_e(caption)}</div>', unsafe_allow_html=True)
         return
@@ -4778,35 +5460,28 @@ def _a6_day_tracker(day, c):
     ui.show_chart(fig, key="a6_player")
     st.markdown(f'<div class="gm-legend">{_e(caption)}</div>', unsafe_allow_html=True)
     with st.expander("Show key moments", expanded=False):
-        ui.snapshot_strip(frames, [i for i, f in enumerate(frames)
-                                   if f["step"] in key][:5],
-                          captions=[f["title"] for f in frames
-                                    if f["step"] in key][:5],
+        ui.snapshot_strip(frames, [i for i, f in enumerate(frames) if f["step"] in key][:5],
+                          captions=[f["title"] for f in frames if f["step"] in key][:5],
                           static_traces=static, series=series, key="a6-keys")
     measured = ui.anim_exports(fig, frames,
                                {"badge": "live illustration",
-                                "detail": "exploratory day run, validated engine",
+                                "detail": "exploratory timeline run, validated engine",
                                 "stride": stride}, key="a6", name="day_tracker")
     ui.anim_budget_note(measured, stride, build_s)
 
 
 # =========================================================================== #
-# The data
+# Sandbox · the generated dataset, shown under the generator
 # =========================================================================== #
-def page_dataset():
-    # Title matches the tab ("Sandbox dataset"), so the page is named one way.
-    ui.page_intro("Sandbox dataset",
-                  "What is in the scenario set you generated, and where the error "
-                  "concentrates.", "Sandbox · Sandbox dataset")
+def _dataset_view():
     d = st.session_state.get("dataset")
     if not d or d.get("df") is None or len(d["df"]) == 0:
-        ui.callout("No dataset has been generated in this session, so there is nothing to "
-                   "show here. Generate one on Make a dataset and it appears on this "
-                   "page.", "No dataset yet", "info")
-        st.page_link(P["sim_dataset"], label="Make a dataset →")
+        ui.callout("No dataset has been generated in this session yet. Generate one above "
+                   "and its summary appears here.", "No dataset yet", "info")
         return
     df = d["df"]
     _cfg = d.get("cfg", {})
+    ui.section_head("What you generated", "where the peaks sit and where the error concentrates")
     ui.kpi_row([("Scenarios", f"{len(df):,}"),
                 ("With more than one peak", f"{int((df['local_peak_count'] > 1).sum()):,}"),
                 ("Largest loss to shade", f"{df['power_loss_percent'].max():.1f}%")])
@@ -4820,16 +5495,16 @@ def page_dataset():
                                                     d.get("ds") or sim.current_ds()),
                               "pv_partial_shading_dataset.zip", "application/zip",
                               key="dl_dataset_datapage", use_container_width=True)
-    except Exception as _e:
+    except Exception as _err:
         hd[1].button("Download (.zip)", disabled=True, use_container_width=True,
-                     help=f"The download could not be built: {_e}")
+                     help=f"The download could not be built: {_err}")
     a, b = st.columns(2, gap="large")
     with a:
         fig = go.Figure(go.Histogram(x=df["gmpp_voltage_V"], nbinsx=40,
                                      marker_color=ui.METHOD_COLORS["Model only"]))
         ui.style_fig(fig, 320, "Scenarios", "Voltage of the true peak (V)")
         fig.update_layout(title="Where the tallest peak sits")
-        ui.show_chart(fig)
+        ui.show_chart(fig, key="ds_hist")
         ui.legend_note("Clusters, not one bump: the peak sits near a strip boundary.")
     with b:
         fig = go.Figure()
@@ -4838,32 +5513,163 @@ def page_dataset():
                                      mode="markers", name=objname, marker=dict(size=6, opacity=0.7)))
         ui.style_fig(fig, 320, "Power lost to shade (%)", "Light blocked (%)")
         fig.update_layout(title="Loss against how dark the shadow is")
-        ui.show_chart(fig)
+        ui.show_chart(fig, key="ds_scatter")
     ui.engine_badge("simplified")
 
 
-def page_sources():
+# =========================================================================== #
+# Results · Research summary — the validated findings in four numbers and one
+# table. Every value is read from a phase-2 export; the interactive pages
+# contribute nothing here. Static figures only.
+# =========================================================================== #
+def page_summary():
     c = ui.T()
-    ui.page_intro("Where it comes from",
-                  "From a laboratory measurement to the figure on screen — and what the numbers cannot tell you.",
-                  "Results · Where it comes from")
+    ui.page_intro("Research summary",
+                  "P&O, InC, PSO and the proposed method under the same partial-shading, "
+                  "dynamic and convergence challenges — the validated evidence.",
+                  "Results · Research summary")
+    ui.data_chip("Benchmark result", "Every number on this page is read from a research "
+                                     "export. Interactive runs never populate it.")
+    t_rel = "phase2/tracker_comparison_val.json"
+    p_rel = "phase2/pso_comparison_val.json"
+    d_rel = "phase2/dynamic_comparison_30-100_val.json"
+    T, Pj, D = _load_json(t_rel), _load_json(p_rel), _load_json(d_rel)
+    if not T:
+        missing_export(t_rel, "The static comparison")
+    elif not require_keys(t_rel, T, ("results", "split"), "the static summary"):
+        T = None
+    if not D:
+        missing_export(d_rel, "The dynamic comparison")
+    elif not require_keys(d_rel, D, ("results", "split"), "the dynamic summary"):
+        D = None
+    if not T and not D:
+        return
 
-    # Which page is drawn by which engine, and where each input comes from.
+    head, sub = "hybrid, bounded", "multi_peak"
+    R = (T or {}).get("results") or {}
+
+    def stat(key, field):
+        return ((R.get(key) or {}).get(sub) or {}).get(field)
+
+    pso_read, pso_best = _pso_readings(Pj)
+    sh = ((D or {}).get("results") or {}).get("shaded") or {}
+
+    def dyn(key, field="aggregate_pct"):
+        return (sh.get(key) or {}).get(field)
+
+    n_static = stat("P&O", "n")
+    kp = [("Static partial shading — found the true peak",
+           f"{_fmt(stat(head, 'reached_pct'), '{:.1f}')}%",
+           f"{method_label(head)} · n={_fmt(n_static, '{:.0f}')} multi-peak · split "
+           f"{(T or {}).get('split', '—')}", "hero"),
+          ("Dynamic EN 50530 — tracking efficiency",
+           f"{_fmt(dyn('hybrid, no reseed'), '{:.2f}')}%",
+           f"{method_label('hybrid, no reseed')} · ±{_fmt(dyn('hybrid, no reseed', 'scenario_se_pct'), '{:.3f}')}"
+           f" · Seq {(D or {}).get('sequence', '30-100')} shaded"),
+          ("Convergence", f"{_fmt(stat(head, 'median_conv_steps'), '{:.0f}')} steps",
+           "median control steps, conditional on arrival"),
+          ("Cost per cycle", f"{SEED_PROBE_COST} readings",
+           f"against {_fmt(pso_read, '{:.0f}')} PSO evaluations, at "
+           f"{_fmt((pso_best or {}).get('multi_peak_reached_pct'), '{:.1f}')}% PSO arrival")]
+    ui.kpi_row(kp, weights=[1.3, 1.2, 0.9, 1.1])
+
+    # ---- the comparison table: the four methods the project set out to compare
+    specs = [("P&O", "P&O", "P&O", None),
+             ("InC", "InC", "InC", None),
+             ("PSO", None, "PSO", pso_read),
+             (f"{method_label(head)} · proposed", head, "hybrid, no reseed", SEED_PROBE_COST)]
+    rows = []
+    for label, skey, dkey, reads in specs:
+        if skey is None and pso_best:
+            found, steady, steps, worst = (pso_best.get("multi_peak_reached_pct"),
+                                           pso_best.get("multi_peak_steady_eff_pct"),
+                                           pso_best.get("multi_peak_median_conv_steps"),
+                                           pso_best.get("multi_peak_worst_energy_lost_w"))
+        else:
+            found, steady, steps, worst = (stat(skey, "reached_pct"), stat(skey, "steady_eff_pct"),
+                                           stat(skey, "median_conv_steps"),
+                                           stat(skey, "worst_energy_lost_w")) if skey else (None,) * 4
+        rows.append({"Method": label,
+                     "Found true peak (%)": _fmt(found, "{:.1f}"),
+                     "Steady efficiency (%)": _fmt(steady, "{:.2f}"),
+                     "Convergence (steps)": _fmt(steps, "{:.0f}"),
+                     "Dynamic efficiency (%)": _fmt(dyn(dkey), "{:.2f}"),
+                     "± s.e.": _fmt(dyn(dkey, "scenario_se_pct"), "{:.3f}"),
+                     "Readings / evaluations": _fmt(reads, "{:.0f}"),
+                     "Worst case (W)": _fmt(worst, "{:.1f}"),
+                     "_found": found})
+    left, right = st.columns([1.35, 1], gap="large")
+    with left:
+        df = pd.DataFrame([{k: v for k, v in r.items() if not k.startswith("_")} for r in rows])
+        st.dataframe(df, hide_index=True, width="stretch")
+        ui.legend_note(f"Static columns: multi-peak subset, n={_fmt(n_static, '{:.0f}')}, "
+                       f"split {(T or {}).get('split', '—')}. Dynamic: EN 50530 Seq "
+                       f"{(D or {}).get('sequence', '—')}, shaded, "
+                       f"{_fmt((D or {}).get('n_shaded'), '{:.0f}')} scenarios. The PSO row "
+                       f"is the best-arrival row of the PSO sweep, selected on this same "
+                       f"split. Convergence is conditional on arrival.")
+    with right:
+        figb = go.Figure()
+        labs = [r["Method"].split(" · ")[0] for r in rows if r["_found"] is not None]
+        vals = [float(r["_found"]) for r in rows if r["_found"] is not None]
+        if vals:
+            figb.add_trace(go.Bar(x=labs, y=vals, marker=dict(color=[ui.method_style(l)["color"] for l in labs]),
+                                  text=[f"{v:.1f}%" for v in vals], textposition="outside",
+                                  showlegend=False, hoverinfo="skip"))
+            figb.update_yaxes(range=[0, 112], title_text="found the true peak (%)")
+            ui.style_fig(figb, height=330)
+            figb.update_layout(title="Static partial shading — arrival rate", margin=dict(r=10))
+            ui.show_chart(figb, key="sum_bars")
+        else:
+            ui.unavailable("Arrival rates unavailable", "The static export carries no arrival rate.", "")
+
+    bits = []
+    if stat(head, "reached_pct") is not None and stat("P&O", "reached_pct") is not None:
+        bits.append(f"Under static partial shading the proposed method found the true peak on "
+                    f"{_fmt(stat(head, 'reached_pct'), '{:.1f}')}% of multi-peak scenarios against "
+                    f"{_fmt(stat('P&O', 'reached_pct'), '{:.1f}')}% for P&O and "
+                    f"{_fmt(stat('InC', 'reached_pct'), '{:.1f}')}% for InC.")
+    if pso_best and stat(head, "steady_eff_pct") is not None:
+        bits.append(f"Against PSO the advantage is cost, not accuracy: "
+                    f"{_fmt(stat(head, 'steady_eff_pct'), '{:.2f}')}% and "
+                    f"{_fmt(pso_best.get('multi_peak_steady_eff_pct'), '{:.2f}')}% energy captured, "
+                    f"at {SEED_PROBE_COST} readings against {_fmt(pso_read, '{:.0f}')} evaluations "
+                    f"per cycle.")
+    if dyn("hybrid, no reseed") is not None and dyn("P&O") is not None:
+        bits.append(f"Under the EN 50530 ramp it held {_fmt(dyn('hybrid, no reseed'), '{:.2f}')}% "
+                    f"against {_fmt(dyn('P&O'), '{:.2f}')}% for P&O — a margin largely inherited "
+                    f"from static trapping, since the ramp barely moves the peak.")
+    if bits:
+        ui.callout(" ".join(bits) + " All figures are simulated on the validation split; the "
+                   "held-out test split has not been evaluated.",
+                   "What the evidence supports", "info")
+    ui.provenance({t_rel.split("/")[-1]: _export_meta(t_rel, T),
+                   p_rel.split("/")[-1]: _export_meta(p_rel, Pj),
+                   d_rel.split("/")[-1]: _export_meta(d_rel, D)})
+
+
+# =========================================================================== #
+# Data & validation · PV model validation  and  · Experiment provenance
+# =========================================================================== #
+def page_validation_model():
+    c = ui.T()
+    ui.page_intro("PV model validation",
+                  "The device model every workflow page runs on, where its parameters come "
+                  "from, how it was checked, and what it cannot claim.",
+                  "Data & validation · PV model validation")
     with st.container(border=True):
         st.markdown(_bh("The two engines"), unsafe_allow_html=True)
-        # The model each engine is, in words. Which Python module implements it
-        # is provenance for a maintainer and sits in Technical details (§24).
         rows = [
             ("Validated engine",
              "Single-diode cell model with bypass diodes and reverse-bias breakdown, "
              "fitted to the CEC reference database",
-             "The panels, Inside a panel, and every Watch, Compare and Explore page",
+             "Scenario, Static test, Dynamic test, and every Results figure",
              "Research and benchmark analysis. Matched to ~1% against 616 laboratory "
              "flash tests."),
             ("Interactive simulator",
              "Simplified single-diode model with per-substring bypass",
-             "Sandbox · Set up a panel, Make a dataset, The dataset",
-             "Exploratory configuration and visualisation. Not a benchmark result; "
+             "Sandbox only",
+             "Exploratory configuration and visualisation. Not benchmark evidence; "
              "reverse-bias breakdown is not modelled."),
         ]
         cells = "".join(
@@ -4881,9 +5687,112 @@ def page_sources():
             f"<span style='color:{c['text_muted']};font-size:11.5px'>what it is for</span>"
             f"{cells}</div>", unsafe_allow_html=True)
         with st.expander("Technical details", expanded=False):
-            st.markdown("- Validated engine: `gmppt.device` with `pvlib` CEC parameters.\n"
+            st.markdown("- Validated engine: `gmppt.device` (`module_iv`, `string_iv`, "
+                        "`array_iv`, `analyse`) with `pvlib` CEC parameters and "
+                        "`gmppt.config.breakdown()`.\n"
                         "- Interactive simulator: `app.py`, single-diode + per-substring "
-                        "bypass.")
+                        "bypass on a typed-in datasheet.")
+    ui.engine_badge("validated")
+
+    with st.container(border=True):
+        st.markdown(_bh("Reference source and procedure"), unsafe_allow_html=True)
+        counts = _split_counts()
+        st.markdown(
+            "- **Parameters** — the CEC module database (`pvlib`'s CECMod table), the "
+            "industry reference set of measured single-diode parameters, restricted to "
+            "the c-Si pool declared in Phase 1.\n"
+            f"- **Split by module** — train {counts['train']:,} · validation {counts['val']:,} "
+            f"· test {counts['test']:,}. The dashboard shows validation modules only; the "
+            f"test split is reserved for one ledgered opening and is never read here.\n"
+            "- **STC verification (S2)** — V_oc, V_mp and I_mp match the datasheet to three "
+            "significant figures across the design span. Temperature coefficients are "
+            "carried as a documented bias (the β_oc deviation equals |Adjust| under the "
+            "CEC parameterisation), not a failure.\n"
+            "- **Shading physics (S3)** — stepped I–V and multi-peak P–V reproduced; "
+            "reverse-bias avalanche parameters recorded as a swept range.\n"
+            "- **External validation (S4)** — structural agreement with Başoğlu (peak "
+            "count, region, ordering); single-diode versus the Sandia measurement model "
+            "at ~2% near STC and ~2.5% at 55 °C over 108 c-Si twin pairs.\n"
+            "- **Array generalisation (S5)** — one module is the N = 1 case of the string "
+            "engine; a shaded string is multi-peak by the same mechanism as a shaded "
+            "module.")
+    with st.container(border=True):
+        st.markdown(_bh("What the model cannot claim"), unsafe_allow_html=True)
+        st.markdown(
+            "- **No field measurements** — every figure in this dashboard is simulated.\n"
+            "- **Multi-peak magnitude** — quantitative validation of multi-peak curves "
+            "against measured data is deferred (no public dataset exists); only the "
+            "structure is validated.\n"
+            "- **Off-STC temperature behaviour** carries the ~2.5% error bar above.\n"
+            "- **One light level per section** for a row or an array; part-of-a-section "
+            "shading is modelled for a single module only.")
+    ui.section_head("Validation record",
+                    "the simplified engine's gates, the measured layers and the literature")
+    with st.expander("Technical details", expanded=False):
+        sim.page_validation()
+
+
+def page_provenance():
+    import datetime as _dt
+    c = ui.T()
+    ui.page_intro("Experiment provenance",
+                  "Which script, export, split, seed and model produced each figure — so a "
+                  "reviewer can answer where a number came from.",
+                  "Data & validation · Experiment provenance")
+    rows = []
+    exports = dict(_EXPORT_SCRIPT)
+    exports.setdefault("phase2/near_tie_screen.json", "phase2/p5_near_tie_screen.py")
+    for rel, script in exports.items():
+        data, problem = _read_export(rel)
+        p = _export_path(rel)
+        meta = _export_meta(rel, data)
+        variants = []
+        if isinstance(data, dict):
+            r = data.get("results") or data.get("stats") or {}
+            if isinstance(r, dict):
+                nested = all(isinstance(v, dict) and any(isinstance(x, dict) for x in v.values())
+                             for v in r.values()) and set(r) <= {"shaded", "uniform"}
+                keys = (sorted({k for v in r.values() for k in v}) if nested else list(r))
+                variants = [method_label(k) if k in _METHOD_LABELS else f"unknown: {k}" for k in keys]
+            if "pso_sweep" in data:
+                variants = [f"PSO sweep, {len(data['pso_sweep'])} points"]
+        try:
+            mtime = _dt.datetime.fromtimestamp(p.stat().st_mtime).strftime("%Y-%m-%d %H:%M") if p.exists() else "—"
+        except Exception:
+            mtime = "—"
+        rows.append({"Export": rel.split("/")[-1], "Produced by": script,
+                     "Status": "present" if not problem else problem,
+                     "Experiment": meta.get("experiment") or "—",
+                     "Split": meta.get("split") or "—", "n": _fmt(meta.get("n"), "{:.0f}"),
+                     "Seed": "—" if meta.get("seed") in (None, "") else str(meta.get("seed")),
+                     "Version": "—" if meta.get("version") in (None, "") else str(meta.get("version")),
+                     "Method variants": ", ".join(variants) if variants else "—",
+                     "Written": mtime})
+    st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
+    ui.legend_note("A dash means the export does not record that field; nothing is filled "
+                   "in. None of these exports writes an explicit run id, so the experiment "
+                   "column shows the family or sequence the file carries.")
+
+    with st.container(border=True):
+        st.markdown(_bh("The trained seed"), unsafe_allow_html=True)
+        model_p = _gcfg.RESULTS_DIR / "phase3" / "c3_two_stage_full.pkl"
+        try:
+            if model_p.exists():
+                st.markdown(f"- `{model_p.name}` · {model_p.stat().st_size / 1e6:.2f} MB · written "
+                            f"{_dt.datetime.fromtimestamp(model_p.stat().st_mtime).strftime('%Y-%m-%d %H:%M')} "
+                            f"· loaded by `TwoStageModel.load('c3_two_stage_full')` · "
+                            f"{'loads' if _c3_model() is not None else 'DOES NOT LOAD'} in this session.\n"
+                            f"- The seed spends `SEED_PROBE_COST = {SEED_PROBE_COST}` control "
+                            f"steps on readings; `model.EXPECTED_PROBES` counts one more for "
+                            f"the landing. Both are correct about different boundaries.\n"
+                            f"- The model file does not record its training list; membership "
+                            f"is resolved live through `gmppt.dataset.module_split()`.")
+            else:
+                ui.unavailable("Model file absent", "The trained seed is not in this copy of "
+                               "the repository, so no hybrid trace can be produced.",
+                               f"- Expected at `{model_p}`.")
+        except Exception as e:
+            st.caption(f"Could not stat the model file: {e}")
 
     with st.container(border=True):
         st.markdown(_bh("Where each input comes from"), unsafe_allow_html=True)
@@ -4898,11 +5807,16 @@ def page_sources():
             "are not from the reference database and are never used for a benchmark.\n"
             "- **Tracking methods** — perturb-and-observe, incremental conductance, "
             "particle swarm, and the learned seed with its hybrid refinement.\n"
-            "- **Changing-conditions profiles** — the EN 50530 irradiance ramps. These "
-            "are a standard test profile, not a time-of-day sun path.\n"
+            "- **Changing-conditions profiles** — the EN 50530 irradiance ramps (a "
+            "standard test profile, not a sun path) and the pole relocation family.\n"
             "- **Comparison figures** — results measured by the analysis runs. When a "
             "result has not been generated the page says so rather than estimating it.")
         with st.expander("Technical details", expanded=False):
+            prov = ""
+            try:
+                prov = str(_gcfg.provenance())
+            except Exception as e:
+                prov = f"config.provenance() unavailable: {e}"
             st.markdown(
                 f"- Module pool: `pvlib.pvsystem.retrieve_sam(\"CECMod\")`, cached to "
                 f"`results/cec_pool.parquet`.\n"
@@ -4916,17 +5830,11 @@ def page_sources():
                 f"here reads `split.test`; it is opened only through "
                 f"`p3_final_comparison.py --confirm-test`, which ledgers each opening.\n"
                 f"- Trackers: `gmppt.tracking`, `gmppt.trackers`, `gmppt.pso`, "
-                f"`gmppt.model` + `gmppt.hybrid`.\n"
-                f"- Profiles: `gmppt.dynamic.SEQUENCES`. Figures: `results/phase2/`.")
-
-    # app.py's validation record lists result files by name. That is provenance
-    # a maintainer needs and a reader does not, so it sits behind one heading
-    # rather than in the page body. app.py itself is untouched.
-    ui.section_head("Validation record",
-                    "how the simplified engine was checked against the validated one")
-    with st.expander("Technical details", expanded=False):
-        sim.page_validation()
-
+                f"`gmppt.model` + `gmppt.hybrid`. Profiles: `gmppt.dynamic.SEQUENCES`; "
+                f"relocation: `phase2/transition.py`.\n"
+                f"- The dashboard's one write is `results/dashboard/current_scenario.json`; "
+                f"everything under `results/phase2/` is read-only to it.\n"
+                f"- Environment stamp: `{_e(prov)}`")
 
 # =========================================================================== #
 # Navigation shell
@@ -4937,101 +5845,138 @@ def page_sources():
 # =========================================================================== #
 _PAGE_FUNCS = {
     "home": (page_home, "Home", "home"),
-    "panels": (page_panels, "The panels", "panels"),
-    "inside": (page_inside, "Inside a panel", "panel"),
-    "system": (None, "Whole system", "system"),          # None = greyed "· coming"
-    "run": (page_run, "Watch one run", "run"),
-    "compare": (page_compare, "Compare methods", "compare"),
-    "moving": (page_moving, "Dynamic irradiance", "dynamic-irradiance"),
-    "relocation": (page_relocation, "Shading relocation", "relocation"),
-    "results": (page_results, "Results vs targets", "results"),
-    "benchset": (page_benchset, "Benchmark scenario set", "benchmark-set"),
-    "sources": (page_sources, "Where it comes from", "sources"),
-    "sim_setup": (page_sim_setup, "Set up a panel", "simulator"),
+    # Scenario
+    "panels": (page_panels, "Build system", "panels"),        # url slug kept: links and sessions
+    "inside": (page_inside, "PV analysis", "panel"),
+    # Static test
+    "run": (page_run, "One run", "run"),
+    "static_compare": (page_static_compare, "Compare methods", "compare-methods"),
+    # Dynamic test
+    "timeline": (page_timeline, "Timeline", "timeline"),
+    "tracker_response": (page_tracker_response, "Tracker response", "tracker-response"),
+    "energy": (page_energy, "Energy", "energy"),
+    # Results — validated exports only
+    "summary": (page_summary, "Research summary", "summary"),
+    "compare": (page_compare, "Static performance", "compare"),
+    "dynamic_perf": (page_dynamic_perf, "Dynamic performance", "dynamic-performance"),
+    "results": (page_results, "Targets", "results"),
+    # Data & validation
+    "benchset": (page_benchset, "Benchmark set", "benchmark-set"),
+    "validation": (page_validation_model, "PV model validation", "validation"),
+    "sources": (page_provenance, "Experiment provenance", "sources"),
+    # Sandbox — the simplified engine, outside the research workflow
+    "sim_setup": (page_sim_setup, "Simulator", "simulator"),
     "sim_saved": (page_sim_saved, "Saved scenarios", "saved"),
-    "sim_dataset": (page_sim_dataset, "Make a dataset", "make-dataset"),
-    "dataset": (page_dataset, "Sandbox dataset", "data"),
+    "sim_sweep": (page_sim_sweep, "Sweep", "sweep"),
+    "sim_dataset": (page_sim_dataset, "Dataset generator", "make-dataset"),
 }
 
-# Section order = the order a reader walks the work. "Whole system" is in the
-# Explore list so it shows as "· coming", but it is not in STEPS, so it never
-# inflates the step count with a page that has nothing on it.
 # --------------------------------------------------------------------------- #
-# THE ONE WORKFLOW TABLE (§3).
+# THE ONE WORKFLOW TABLE.
 #
-# A stage is what the reader is doing, not where a file lives. Everything that
-# names a stage reads it from here — the header strip, the page eyebrow, the
-# footer, the Home stepper, the tutorial and the tests — so they cannot drift
-# apart the way the old header sections ("Explore / Testing / The data") and the
-# stage names had. Sandbox is a separate engine and sits outside the journey.
+# The dashboard is organised around the research experiment lifecycle:
+#
+#   SCENARIO       build the physical PV system once (Build system), and read
+#                  why its curve looks the way it does (PV analysis)
+#   STATIC TEST    every tracker on the same frozen condition (One run,
+#                  Compare methods) — the user's scenario, exploratory
+#   DYNAMIC TEST   the same system with G(t), T(t), Shade(t) (Timeline),
+#                  the trackers through it (Tracker response), and what that
+#                  cost or recovered (Energy) — the user's scenario, exploratory
+#   RESULTS        the validated research evidence, read from the harness
+#                  exports only; never populated by an interactive run
+#   DATA & VALIDATION  what the evidence was measured on, how the PV model was
+#                  validated, and where every number came from
+#   SANDBOX        the simplified engine, outside the workflow
+#
+# Everything that names a section reads it from here — the header, the page
+# eyebrow, the footer, the tutorial and the tests — so they cannot drift.
 # --------------------------------------------------------------------------- #
 STAGES = [
-    ("Understand", ["panels"]),                    # build the scenario
-    ("Inspect",    ["inside", "system"]),          # look at what it did to the curve
-    ("Watch",      ["run"]),                       # watch each tracker search it
-    ("Compare",    ["compare"]),                   # every method on the whole set
-    ("Explore",    ["moving", "relocation"]),      # changing conditions
-    ("Results",    ["results", "benchset", "sources"]),   # targets and provenance
+    ("Scenario",          ["panels", "inside"]),
+    ("Static test",       ["run", "static_compare"]),
+    ("Dynamic test",      ["timeline", "tracker_response", "energy"]),
+    ("Results",           ["summary", "compare", "dynamic_perf", "results"]),
+    ("Data & validation", ["benchset", "validation", "sources"]),
 ]
-SANDBOX = ["sim_setup", "sim_saved", "sim_dataset", "dataset"]
+SANDBOX = ["sim_setup", "sim_saved", "sim_sweep", "sim_dataset"]
 JOURNEY = [s for s, _ in STAGES]
 
 SECTION_KEYS = {s: list(ks) for s, ks in STAGES}
 SECTION_KEYS["Sandbox"] = list(SANDBOX)
-# The sequence the footer walks. "system" is planned, not built, so it is not a
-# step.
-_FLOW = [k for _, ks in STAGES for k in ks if k != "system"]
+# The guided journey the footer walks, with step numbers: build → analyse →
+# one run → compare → timeline → response → energy → the validated summary.
+# The remaining Results and Data & validation pages, and the Sandbox, get a
+# Previous / Next within their own section but no step number.
+_FLOW = ["panels", "inside", "run", "static_compare", "timeline", "tracker_response",
+         "energy", "summary"]
 _SANDBOX_FLOW = list(SANDBOX)
-_FLOW_STAGE = {k: s for s, ks in STAGES for k in ks if k != "system"}
+_FLOW_STAGE = {k: s for s, ks in STAGES for k in ks}
 
 
 def stage_of(key: str) -> str:
-    """The workflow stage a page belongs to, or 'Sandbox'."""
+    """The workflow section a page belongs to, or 'Sandbox'."""
     return _FLOW_STAGE.get(key) or ("Sandbox" if key in SANDBOX else "")
 
-# One sentence per page, shown under the title, answering "what is this for?".
+
+# One sentence per page, answering "what is this for?".
 _PAGE_PURPOSE = {
-    "panels": "Build a scenario: choose a module, place a shadow, set the conditions.",
-    "inside": "Inspect the scenario you built — every peak, and what the bypass "
-              "diodes are doing.",
-    "run": "Watch each tracking method search the same curve.",
-    "compare": "Compare the methods across the whole validation set.",
-    "moving": "See how the methods behave while conditions change.",
-    "relocation": "See what happens when the strongest peak moves to another strip.",
-    "results": "The measured results beside the targets.",
-    "benchset": "What those results were measured on.",
-    "sources": "Where every input comes from.",
+    "panels": "Build the PV system once, then set the shadow and the conditions right now.",
+    "inside": "Why this condition gives this curve: sections, bypass diodes, peaks.",
+    "run": "Watch one tracker search the frozen condition, step by step.",
+    "static_compare": "P&O, InC, PSO and the proposed method on the same condition.",
+    "timeline": "The same system with sunlight, temperature and shading that change.",
+    "tracker_response": "How each method follows the moving peak through your timeline.",
+    "energy": "What tracking cost or recovered over the whole timeline.",
+    "summary": "The validated research findings, in four numbers.",
+    "compare": "Validated static partial-shading results over the whole validation set.",
+    "dynamic_perf": "Validated EN 50530 and relocation results.",
+    "results": "The project's targets beside what was measured.",
+    "benchset": "What the validated results were measured on.",
+    "validation": "How the PV model was validated, and what it cannot claim.",
+    "sources": "Which script, export, split and seed produced each figure.",
 }
 
-# What each workflow stage is for, for the hover help on the flow strip (§7).
-# Derived from the page purposes so the two can never drift apart: a stage is
-# described by the first page that carries it.
+# What each section is for, for the hover help on the header (derived from the
+# first page that carries it, so the two cannot drift apart).
 _STAGE_PURPOSE = {}
 for _k, _stage in _FLOW_STAGE.items():
     _STAGE_PURPOSE.setdefault(_stage, _PAGE_PURPOSE.get(_k, ""))
+_STAGE_PURPOSE["Sandbox"] = "The simplified engine, for exploration. Not benchmark evidence."
 
 _NEXT_WHY = {
-    "panels": "You have a scenario. Look at why its curve has more than one peak.",
-    "inside": "You know why the peaks are there. Watch each method try to find the tallest.",
-    "run": "One curve proves nothing on its own. See every method on every shaded case.",
-    "compare": "Now see whether it holds while the irradiance changes.",
-    "moving": "A ramp barely moves the peak. See what happens when the peak jumps.",
-    "relocation": "You have seen every experiment. Read them against the funded targets.",
+    "panels": "You have a system and a condition. Read why its curve has more than one peak.",
+    "inside": "You know why the peaks are there. Watch one method try to find the tallest.",
+    "run": "Now every baseline and the proposed method on this same condition.",
+    "static_compare": "The condition was frozen. Let it change through a day.",
+    "timeline": "Send the timeline through the trackers.",
+    "tracker_response": "What did trapping and slow recovery cost over the day?",
+    "energy": "Your runs were exploratory. Read the validated evidence.",
+    "summary": "The static result in full, with its caveats.",
+    "compare": "Then the dynamic and relocation results.",
+    "dynamic_perf": "Read them against the project's targets.",
     "results": "Every number rests on a scenario set. See what is in it.",
-    "benchset": "And where each of its inputs came from.",
+    "benchset": "And how the PV model behind it was validated.",
+    "validation": "And exactly which run produced each figure.",
     "sim_setup": "Keep a curve to compare against later.",
-    "sim_saved": "Or generate thousands of scenarios like it.",
-    "sim_dataset": "Then look at what you generated.",
+    "sim_saved": "Or sweep the presets across temperature and light.",
+    "sim_sweep": "Or generate thousands of scenarios.",
 }
 
 # Widget keys that must survive a page change (R2). Streamlit deletes a widget's
 # key on any run that does not render it, which in a multipage app is every run
-# spent on another page.
+# spent on another page. No button key may appear here or match a prefix.
 _PERSIST_KEYS = [
-    "gm_panel", "gm_obj2", "gm_runs", "gm_edge", "gm_shaded_ids", "gm_sel",
-    "gm_showuns", "gm_pv", "gm_vop", "gm_rows", "gm_per", "gm_mount",
-    "gm_depth2", "gm_width", "gm_G2", "gm_T2",
-    "run_overlay", "mv_scen", "mv_show", "mv_mode", "saved_pick", "day_time",
+    "gm_panel", "gm_sel", "gm_vop", "gm_rows", "gm_per", "gm_G2", "gm_T2",
+    "run_overlay", "mv_scen", "mv_show", "mv_mode", "saved_pick",
+    "gm_opt", "gm_time", "gm_scope", "gm_lab", "gm_topo_seen",
+    # which Scenario cards are folded: view state, kept across pages, never hashed
+    "scenario_system_expanded", "scenario_conditions_expanded", "scenario_shading_expanded",
+    # Static test
+    "sc_show",
+    # Dynamic test: the timeline controls and both playheads (view state)
+    "tl_time", "tl_peak", "tl_tdawn", "tl_tnoon", "tl_panel", "tl_kind", "tl_target",
+    "tr_time", "tr_show", "en_show", "dp_seq",
     "gm_anim", "gm_lang", "a1_steps", "a1_view", "a1_built", "a2_built", "a3_built",
     "a4_built", "a5_built", "a6_built", "a7_built", "a9_built",
     "bench_preset", "bench_nsub", "bench_mstr", "bench_pstr", "bench_obj",
@@ -5044,14 +5989,21 @@ _PERSIST_KEYS = [
     # assignment can catch. 12 is the substring maximum the number_input allows.
     f"bench_s{i}" for i in range(12)
 ]
-_PERSIST_PREFIXES = ("day_win_", "day_mot_", "swp_")
+# shp_/drk_/pos_ are the per-panel shading widgets on Scenario, keyed by panel
+# uid; tlw_ are the per-event widgets on Timeline, keyed by event uid. Buttons
+# on those pages are keyed gm_*/tl_* so no prefix can reach one.
+_PERSIST_PREFIXES = ("swp_", "shp_", "drk_", "pos_", "tlw_")
 
 
 def _step_of(key):
+    """(step, total, flow). Numbered along the guided journey; the other
+    Results, Data & validation and Sandbox pages get Previous / Next within
+    their own section without a step number."""
     if key in _FLOW:
         return _FLOW.index(key) + 1, len(_FLOW), _FLOW
-    if key in _SANDBOX_FLOW:
-        return _SANDBOX_FLOW.index(key) + 1, len(_SANDBOX_FLOW), _SANDBOX_FLOW
+    keys = SECTION_KEYS.get(stage_of(key)) or []
+    if key in keys:
+        return None, None, keys
     return None, None, None
 
 
@@ -5093,9 +6045,12 @@ def _make_page(key):
             if key not in seen:
                 seen.append(key)
         if key in SECTION_KEYS["Sandbox"]:
-            st.markdown('<div class="gm-sandbox"><b>Sandbox · simplified engine</b>'
-                        '<span>Exploratory configuration and visualisation. Nothing here '
-                        'is a benchmark result.</span></div>', unsafe_allow_html=True)
+            # The persistent Sandbox indicator: every Sandbox page, every render.
+            st.markdown('<div class="gm-sandbox">'
+                        '<b>Sandbox · simplified engine · not benchmark evidence</b>'
+                        '<span>Exploratory configuration and visualisation on a typed-in '
+                        'datasheet. Nothing here reaches Results.</span></div>',
+                        unsafe_allow_html=True)
         fn()
         if key == "home":
             # After the body, so every control the tour points at is on the page.
@@ -5106,6 +6061,11 @@ def _make_page(key):
             i = flow.index(key)
             prev_key = flow[i - 1] if i > 0 else "home"
             next_key = flow[i + 1] if i + 1 < len(flow) else None
+            if next_key is None:
+                # the journey ends on Research summary; carry on through Results
+                sec = SECTION_KEYS.get(stage_of(key)) or []
+                if key in sec and sec.index(key) + 1 < len(sec):
+                    next_key = sec[sec.index(key) + 1]
             ui.footer_nav(P.get(prev_key), P.get(next_key) if next_key else None,
                           step, total, _NEXT_WHY.get(key, ""))
 
@@ -5128,10 +6088,11 @@ def _resend_notice():
     a, b = st.columns([5, 1.2], vertical_alignment="center")
     with a:
         ui.callout(f"The scenario running here is “{sent.get('label', 'the sent one')}”. "
-                   f"You have since edited The panels to “{draft.get('label', 'something else')}” "
-                   f"without sending it.", "Edited since sent", "caveat")
+                   f"You have since edited Build system to "
+                   f"“{draft.get('label', 'something else')}” without sending it.",
+                   "Edited since sent", "caveat")
     if b.button("Resend", key="run_resend", use_container_width=True,
-                help="Run the scenario you are now editing on The panels."):
+                help="Run the scenario you are now editing on Build system."):
         st.session_state["scenario_sent"] = dict(draft)
         st.toast("Resent the scenario you are editing.")
         st.rerun()

@@ -462,3 +462,77 @@ def string_iv(mp: ModuleParams, module_irradiances, T,
 
     P = V * I
     return dict(I=I, V=V, P=P, isc_modules=isc, n_modules=len(patterns))
+
+
+# --------------------------------------------------------------------------
+# Array composition: strings in parallel  (additive; dashboard Scenario page)
+# --------------------------------------------------------------------------
+def array_iv(mp: ModuleParams, string_irradiances, T,
+             n_substrings=config.N_SUBSTRINGS,
+             bd: Breakdown | None = None, bp: Bypass | None = None,
+             blocking_diodes=True, n_points=4000):
+    """Compose an array I-V curve from strings connected in parallel.
+
+    `string_irradiances` is one `module_irradiances` collection per parallel
+    string, each exactly what `string_iv` accepts. Every string is composed by
+    `string_iv` (modules in series, module-level bypass) and nothing about that
+    composition is changed here; this function only adds the one operation a
+    parallel connection needs.
+
+    Strings in parallel share one terminal voltage, so the composition is done
+    in the VOLTAGE domain: a common ascending voltage grid from 0 to the
+    largest string V_oc, each string's current interpolated onto it, and the
+    currents summed. Each string's curve is known only where its current is
+    non-negative (V <= its own V_oc); `string_iv` never computes the forward-
+    conduction branch above V_oc.
+
+    blocking_diodes=True (the protected case): a blocking diode in series with
+    each string stops it from sinking current from the others, so a string's
+    contribution is clipped at zero — above its own V_oc it contributes
+    nothing, and a weak string can never subtract from a healthier one.
+
+    blocking_diodes=False is the explicitly unprotected comparison case, in
+    which a weak string may carry reverse current. That needs each string's
+    I(V) for V > V_oc, which the validated engine does not model, so it is
+    refused rather than invented: NotImplementedError.
+
+    A single-string array returns that string's own curve (sorted by ascending
+    voltage), so it reproduces `string_iv` exactly.
+
+    Returns a dict with arrays I, V, P (V ascending) plus per-string V_oc and
+    short-circuit currents — the shape `analyse` expects.
+    """
+    bd = bd or Breakdown()
+    bp = bp or Bypass(temp_c=T)
+    if not blocking_diodes:
+        raise NotImplementedError(
+            "array_iv(blocking_diodes=False): reverse current through an unprotected "
+            "string requires each string's I(V) above its V_oc (forward conduction), "
+            "which the validated engine does not compute. Only the blocking-diode "
+            "case is available.")
+    strings = [string_iv(mp, s, T, n_substrings=n_substrings, bd=bd, bp=bp,
+                         n_points=n_points) for s in string_irradiances]
+    assert strings, "an array needs at least one string"
+
+    vocs, iscs, sorted_curves = [], [], []
+    for s in strings:
+        o = np.argsort(s["V"])
+        v_asc, i_asc = s["V"][o], s["I"][o]
+        sorted_curves.append((v_asc, i_asc))
+        vocs.append(float(s["V"].max()))          # V at I = 0, the first grid point
+        iscs.append(float(np.interp(0.0, v_asc, i_asc)))
+
+    if len(strings) == 1:                          # exact, not interpolated
+        v_asc, i_asc = sorted_curves[0]
+        return dict(I=i_asc, V=v_asc, P=v_asc * i_asc, voc_strings=vocs,
+                    isc_strings=iscs, n_strings=1, blocking_diodes=True)
+
+    V = np.linspace(0.0, max(vocs), n_points)
+    I = np.zeros_like(V)
+    for v_asc, i_asc in sorted_curves:
+        # right=0.0: above this string's V_oc its blocking diode holds it at
+        # zero; the clip covers any sign the interpolation leaves at the edge.
+        I += np.maximum(np.interp(V, v_asc, i_asc, right=0.0), 0.0)
+    P = V * I
+    return dict(I=I, V=V, P=P, voc_strings=vocs, isc_strings=iscs,
+                n_strings=len(strings), blocking_diodes=True)

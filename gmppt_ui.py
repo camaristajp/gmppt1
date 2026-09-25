@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import datetime as _dt
 import html
+import itertools
 import os
 import re
 from typing import Iterable, Mapping, Sequence
@@ -164,8 +165,9 @@ def T() -> dict:
 # --------------------------------------------------------------------------- #
 def setup(theme: str = "light") -> None:
     """Call once at the top of the entry script, after st.set_page_config."""
-    global _theme_name
+    global _theme_name, _ROW_IDS
     _theme_name = "dark" if str(theme).lower().startswith("d") else "light"
+    _ROW_IDS = itertools.count()          # sibling_row keys restart every run
     _inject_css(T())
     _register_plotly(T())
 
@@ -199,7 +201,10 @@ def _inject_css(c: dict) -> None:
         border-bottom: 3px solid transparent; }}
     [class*="st-key-gm-tab-"] a p {{ font-size: 0.92rem; color: {c['text_body']} !important; }}
     [class*="st-key-gm-tab-"] a:hover {{ border-bottom-color: {c['border_strong']}; }}
-    .gm-tab-on {{ display: inline-block; padding: 10px 14px 9px 14px; border-bottom: 3px solid {c['teal']};
+    /* the active sub-page: a lighter treatment than the section's filled pill —
+       a thin underline on a faint tint, so the two levels read as two levels */
+    .gm-tab-on {{ display: inline-block; padding: 10px 14px 9px 14px; border-bottom: 2px solid {c['teal']};
+        background: {c['teal_tint']}; border-radius: {RADIUS['sm']} {RADIUS['sm']} 0 0;
         font-weight: 600; font-size: 0.92rem; color: {c['text']}; font-family: {FONTS['body']}; }}
     .gm-tab-off {{ display: inline-block; padding: 10px 14px 9px 14px; font-size: 0.92rem;
         color: {c['text_faint']}; font-family: {FONTS['body']}; }}
@@ -345,14 +350,67 @@ def _inject_css(c: dict) -> None:
     .gm-lead {{ font-size: 1.02rem; line-height: 1.55; color: {c['text_body']}; max-width: 820px; margin: 4px 0 0 0; }}
     .gm-label {{ font-size: 0.74rem; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase;
         color: {c['text_muted']}; margin: 6px 0 4px 0; }}
+    /* ---------- GMPPT Bench layout rule ----------
+       Sibling cards representing equivalent metrics or options in the same
+       horizontal row stretch to the height of the tallest sibling. Height
+       equality is ROW-LOCAL and SEMANTIC: sibling_row() opts a row in, and
+       unrelated sections are never forced to a common global height. The
+       stretch runs through every Streamlit wrapper between the column and the
+       card, so it needs no per-card pixel heights. Once columns stack on a
+       narrow screen each card is its own row and the rule relaxes by itself. */
+    [class*="st-key-gm-siblings-"] {{ container-type: inline-size; }}
+    [class*="st-key-gm-siblings-"] [data-testid="stColumn"] {{ display: flex; flex-direction: column; }}
+    [class*="st-key-gm-siblings-"] [data-testid="stColumn"] > div,
+    [class*="st-key-gm-siblings-"] [data-testid="stColumn"] [data-testid="stVerticalBlock"],
+    [class*="st-key-gm-siblings-"] [data-testid="stColumn"] [data-testid="stElementContainer"],
+    [class*="st-key-gm-siblings-"] [data-testid="stColumn"] [data-testid="stMarkdown"],
+    [class*="st-key-gm-siblings-"] [data-testid="stColumn"] [data-testid="stMarkdown"] > div,
+    [class*="st-key-gm-siblings-"] [data-testid="stColumn"] [data-testid="stMarkdownContainer"] {{
+        flex: 1 1 auto; display: flex; flex-direction: column; align-items: stretch;
+        min-height: 0; width: 100%; }}
+    [class*="st-key-gm-siblings-"] .gm-kpi {{ flex: 1 1 auto; height: 100%; min-height: 0; }}
+    /* a row too narrow for its siblings stacks them; stacked, each is its own
+       row and the equal-height rule relaxes on its own */
+    @container (max-width: 300px) {{
+        [class*="st-key-gm-siblings-"] [data-testid="stHorizontalBlock"] {{ flex-wrap: wrap; }}
+        [class*="st-key-gm-siblings-"] [data-testid="stColumn"] {{ flex: 1 1 100% !important;
+            width: 100% !important; min-width: 100% !important; }}
+    }}
+
+    /* KPI card: label (one line) / value (one line) / note. The three regions
+       sit at the same offsets in every sibling, so labels, values and the
+       notes' first lines align; the stretch above makes the bottoms align. */
     .gm-kpi {{ background: {c['surface']}; border: 1px solid {c['border']}; border-radius: {RADIUS['lg']};
-        padding: 14px 18px; min-height: 122px; box-sizing: border-box; }}
-    .gm-kpi .k {{ font-family: {FONTS['mono']}; font-size: 0.7rem; letter-spacing: 0.07em;
-        text-transform: uppercase; color: {c['text_muted']}; }}
-    .gm-kpi .v {{ font-family: {FONTS['mono']}; font-size: 1.6rem; margin-top: 4px; color: {c['text']}; }}
-    .gm-kpi .v.text {{ font-family: {FONTS['display']}; font-size: 1.15rem; font-weight: 600;
-        line-height: 1.25; margin-top: 8px; }}
-    .gm-kpi .n {{ font-size: 0.8rem; color: {c['text_muted']}; margin-top: 2px; }}
+        padding: 12px 14px; min-height: 112px; box-sizing: border-box; display: flex; flex-direction: column;
+        container-type: inline-size; }}
+    .gm-kpi .k {{ font-family: {FONTS['mono']}; font-size: 0.68rem; letter-spacing: 0.07em; line-height: 1.3;
+        text-transform: uppercase; color: {c['text_muted']}; white-space: nowrap; overflow: hidden;
+        text-overflow: ellipsis; }}
+    .gm-kpi .v {{ font-family: {FONTS['mono']}; font-size: 1.5rem; line-height: 1.2; margin-top: 6px;
+        color: {c['text']}; white-space: nowrap; letter-spacing: -0.01em; }}
+    .gm-kpi .v.text {{ font-family: {FONTS['display']}; font-size: 1.12rem; font-weight: 600;
+        line-height: 1.25; margin-top: 8px; white-space: normal; }}
+    .gm-kpi .n {{ font-size: 0.78rem; line-height: 1.35; color: {c['text_muted']}; margin-top: 4px; }}
+    @container (max-width: 150px) {{ .gm-kpi .v {{ font-size: 1.2rem; }} .gm-kpi .k {{ font-size: 0.62rem; }} }}
+
+    /* ---------- collapsible card: a styled expander, never a bare one ---------- */
+    [class*="st-key-gm-col-"] [data-testid="stExpander"] details {{ background: {c['surface']};
+        border: 1px solid {c['border']} !important; border-radius: {RADIUS['lg']} !important; }}
+    [class*="st-key-gm-col-"] [data-testid="stExpander"] summary {{ padding: 11px 14px; gap: 8px;
+        background: {c['surface']} !important; border-radius: {RADIUS['lg']}; }}
+    [class*="st-key-gm-col-"] [data-testid="stExpander"] details[open] > summary {{
+        border-bottom: 1px solid {c['border']}; border-radius: {RADIUS['lg']} {RADIUS['lg']} 0 0; }}
+    [class*="st-key-gm-col-"] [data-testid="stExpander"] summary,
+    [class*="st-key-gm-col-"] [data-testid="stExpander"] summary * {{ color: {c['text_body']}; }}
+    [class*="st-key-gm-col-"] [data-testid="stExpander"] summary:hover {{ color: {c['teal']}; }}
+    [class*="st-key-gm-col-"] [data-testid="stExpander"] summary:focus-visible {{
+        outline: 2px solid {c['amber']}; outline-offset: -2px; border-radius: {RADIUS['lg']}; }}
+    [class*="st-key-gm-col-"] [data-testid="stExpander"] summary p {{ margin: 0; font-size: 0.82rem;
+        color: {c['text_muted']}; line-height: 1.4; }}
+    [class*="st-key-gm-col-"] [data-testid="stExpander"] summary strong {{ font-family: {FONTS['display']};
+        font-weight: 700; font-size: 0.95rem; color: {c['text']}; }}
+    [class*="st-key-gm-col-"] [data-testid="stExpander"] summary svg {{ color: {c['text_muted']}; }}
+    [class*="st-key-gm-col-"] [data-testid="stExpanderDetails"] {{ padding: 0 14px 12px 14px; }}
     /* A term with hover help is marked, so a reader knows there is more to
        read — the visible label still has to make sense on its own (§7). */
     .gm-kpi .k.tip, .gm-tip {{ cursor: help;
@@ -614,15 +672,63 @@ def kpi(label: str, value: str, note: str = "", tone: str = "neutral",
     )
 
 
-def kpi_row(items: Sequence[tuple], weights: Sequence[float] | None = None) -> None:
-    """items: [(label, value, note, tone), ...] — note and tone optional."""
-    cols = st.columns(weights or [1] * len(items))
+_ROW_IDS = itertools.count()
+
+
+def sibling_row(weights: Sequence[float] | int, gap: str = "small"):
+    """Columns for cards of the SAME visual role in one row (the layout rule).
+
+    The row is a keyed container (`gm-siblings-<n>`) whose CSS stretches each
+    column's card to the tallest sibling. Use it for KPI / metric / method /
+    result cards side by side; do not use it for a chart beside a paragraph.
+    The counter is reset in setup() every run, so keys are stable per run.
+    """
+    with st.container(key=f"gm-siblings-{next(_ROW_IDS)}"):
+        return st.columns(weights, gap=gap)
+
+
+def kpi_row(items: Sequence[tuple], weights: Sequence[float] | None = None,
+            equal_height: bool = True) -> None:
+    """items: [(label, value, note, tone), ...] — note and tone optional.
+
+    equal_height (default): the cards are siblings, so they share the height
+    of the tallest one, everywhere this is called."""
+    n = len(items)
+    cols = (sibling_row(weights or [1] * n) if equal_height
+            else st.columns(weights or [1] * n))
     for col, it in zip(cols, items):
         label, value, *rest = it
         note = rest[0] if len(rest) > 0 else ""
         tone = rest[1] if len(rest) > 1 else "neutral"
         with col:
             kpi(label, value, note, tone)
+
+
+def collapsible(title: str, key: str, summary: str = "", open_note: str = "",
+                expanded: bool = True):
+    """A card whose body folds away behind its own header (§ layout revision).
+
+    A styled `st.expander`: the native control, so the header is a real
+    button with `aria-expanded`, keyboard focus and the chevron at the right
+    edge. The open/closed state lives in `st.session_state[key]` — VIEW STATE
+    only; it never enters a scenario record or hash. Pass `summary` generated
+    from the current state: it is shown in the header while the card is
+    collapsed, so a folded card still says what it holds. `open_note` is an
+    optional muted suffix shown while open (e.g. which panel a card edits).
+    Cards are independent — opening one never closes another.
+
+        with ui.collapsible("1 · Your PV system", "scenario_system_expanded",
+                            summary="1 panel · 60-cell Si"):
+            ...controls...
+    """
+    is_open = bool(st.session_state.get(key, expanded))
+    tail = summary if (summary and not is_open) else (open_note if is_open else "")
+    label = f"**{title}**" + (f"  ·  {tail}" if tail else "")
+    # the session value wins once the key exists; passing `expanded` as well
+    # would be a second source of truth that Streamlit warns about
+    kw = {} if key in st.session_state else {"expanded": expanded}
+    with st.container(key=f"gm-col-{key}"):
+        return st.expander(label, key=key, on_change="rerun", **kw)
 
 
 def callout(body: str, title: str = "", kind: str = "caveat") -> None:
@@ -705,9 +811,11 @@ def app_header(pages: dict, sections: dict, current: str, routes: dict | None = 
     sections {"Understand": ["panels"], "Inspect": ["inside", "system"], ...}
              first key = the page a stage lands on
     current  key of the page being shown
-    journey  the section names that form the workflow, in order. They are drawn
-             as UNDERSTAND → [INSPECT] → WATCH …, which is the persistent
-             "where am I?" (§5). Sections outside the journey (Sandbox) sit apart.
+    journey  the research sections, in order: SCENARIO, STATIC TEST, DYNAMIC
+             TEST, RESULTS, DATA & VALIDATION. They are drawn side by side with
+             no arrows — the header is navigation, not a progress indicator; the
+             footer carries the guided progression. Sections outside the journey
+             (Sandbox) sit apart behind a thin gap.
     stage_help  one sentence per stage, shown on hover (§7)
     Use together with st.navigation(..., position="hidden")."""
     cur_sec = next((sec for sec, ks in sections.items() if current in ks), None)
@@ -719,13 +827,13 @@ def app_header(pages: dict, sections: dict, current: str, routes: dict | None = 
             with st.container(key="gm-wordmark", width="content"):
                 st.page_link(pages["home"], label="GMPPT Bench")
             st.html('<span style="display:inline-block;width:10px"></span>', width="content")
-            first = True
+            # The global header is NAVIGATION, not a progress indicator: the six
+            # research sections side by side, no arrows between them. Guided
+            # progression lives in the footer. Sections outside the journey
+            # (Sandbox) sit apart behind a thin gap.
             for sec, keys in sections.items():
-                slug = sec.lower().replace(" ", "-")
-                in_journey = sec in journey
-                if in_journey and not first:
-                    st.html('<span class="gm-stage-sep">→</span>', width="content")
-                if not in_journey:
+                slug = re.sub(r"[^a-z0-9]+", "-", sec.lower()).strip("-")
+                if sec not in journey:
                     st.html('<span class="gm-stage-gap"></span>', width="content")
                 if sec == cur_sec:
                     tip = f' title="{_e(help_of.get(sec, ""))}"' if help_of.get(sec) else ""
@@ -734,7 +842,6 @@ def app_header(pages: dict, sections: dict, current: str, routes: dict | None = 
                     with st.container(key=f"gm-sec-{slug}", width="content"):
                         st.page_link(pages[keys[0]], label=sec,
                                      help=help_of.get(sec) or None)
-                first = first and not in_journey
             st.space("stretch")
             if routes and current in routes:
                 st.html(f'<span class="gm-route">{_e(routes[current])}</span>', width="content")
@@ -858,8 +965,8 @@ def scenario_banner(draft: dict | None, sent: dict | None, page_kind: str) -> bo
     body = " · ".join(_e(str(b)) for b in bits) or {
         "aggregate": "Aggregate results over the whole scenario set.",
         "fixed_demo": "This trace runs a fixed demo module, not your scenario.",
-        "example": "No scenario sent from Explore — showing the built-in example.",
-        "none": "Build a scenario on The panels.",
+        "example": "No scenario sent from Build system — showing the built-in example.",
+        "none": "Build a scenario on Scenario · Build system.",
     }.get(state, "")
 
     resend = False
@@ -871,8 +978,8 @@ def scenario_banner(draft: dict | None, sent: dict | None, page_kind: str) -> bo
         if state == "edited" and page_kind == "testing":
             resend = right.button("Resend", key=f"gm-resend-{page_kind}",
                                   use_container_width=True,
-                                  help="Copy the scenario you are editing on The panels "
-                                       "over the one Testing is running.")
+                                  help="Copy the scenario you are editing on Build system "
+                                       "over the one the tests are running.")
     return bool(resend)
 
 
@@ -929,15 +1036,16 @@ _CHIP_TONE = {
 }
 
 
-FLOW_STAGES = ["Understand", "Inspect", "Watch", "Compare", "Explore", "Results"]
+# The research sections, in workflow order. The Sandbox sits outside them.
+FLOW_STAGES = ["Scenario", "Static test", "Dynamic test", "Results", "Data & validation"]
 
 
 def flow_indicator(stage: str | None, purposes: Mapping[str, str] | None = None,
                    here: str = "") -> None:
-    """Understand → Inspect → Watch → Compare → Explore → Results (§5).
+    """Scenario · Static test · Dynamic test · Results · Data & validation.
 
     Deliberately not a second navigation system: it is a one-line "where am I",
-    with the current stage highlighted. The header already handles going places.
+    with the current section highlighted. The header already handles going places.
 
     `purposes` maps a stage to one sentence about what happens there, shown on
     hover (§7). `here` is this page's own purpose, printed under the strip so
@@ -952,7 +1060,7 @@ def flow_indicator(stage: str | None, purposes: Mapping[str, str] | None = None,
         attr = f' title="{_e(tip)}"' if tip else ""
         parts.append(f'<span class="{cls}"{attr}>{_e(s)}</span>')
         if i < len(FLOW_STAGES) - 1:
-            parts.append('<span class="sep">→</span>')
+            parts.append('<span class="sep">·</span>')
     strip = f'<div class="gm-flow">{"".join(parts)}</div>'
     if here:
         strip += f'<div class="gm-purpose">{_e(here)}</div>'

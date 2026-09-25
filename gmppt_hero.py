@@ -51,8 +51,8 @@ TEXT = {
              "Pick a 60- or 72-cell module, set the sunlight and the cell temperature, "
              "and start from a clean unshaded curve."),
             ("Place the shadow",
-             "Drag a band along the cell strips or across them, choose how dark it is, "
-             "and watch which bypass diodes switch on."),
+             "On Scenario · Build system, build your PV system once, put a shadow on a panel, "
+             "choose how dark it is, and watch which bypass paths switch on."),
             ("Read the curve",
              "The current and power curves redraw as you go, with the step, every peak, "
              "and the true maximum marked."),
@@ -96,8 +96,9 @@ TEXT = {
              "60셀 또는 72셀 모듈을 고르고 일사량과 셀 온도를 "
              "설정한 뒤, 그늘이 없는 깨끗한 공선에서 시작합니다."),
             ("그림자 배치",
-             "셀 스트립을 따라 또는 가로질러 띄를 놓고 어둡기를 "
-             "정한 뒤, 어떤 바이패스 다이오드가 켜지는지 확인합니다."),
+             "시나리오 페이지에서 PV 시스템을 한 번 구성하고, "
+             "패널에 그림자를 놓고 어둡기를 정한 뒤, "
+             "어떤 바이패스 경로가 켜지는지 확인합니다."),
             ("공선 읽기",
              "조작할 때마다 전류·전력 공선이 다시 그려지고, "
              "계단과 모든 봉우리, 진짜 최대점이 표시됩니다."),
